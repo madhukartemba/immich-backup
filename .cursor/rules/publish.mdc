@@ -1,0 +1,14 @@
+---
+description: Commit, push, and update the test server after requested backup-app changes
+alwaysApply: true
+---
+
+# Publish this app
+
+After a requested change to this backup app, commit it, push it to origin, and install that commit on the test server. Do this without waiting to be asked again.
+
+- Commit as the repo's existing local author. Do not change git config.
+- Do not commit secrets, `__pycache__`, or `dist/`.
+- The test server is `immich@192.168.0.51`. Install from the pushed commit with `sudo python3 install.py`. The installer must not overwrite `/etc/immich-backup/config.ini`.
+- Restart `immich-backup-status.service` so the page loads the new code. Do not restart `immich-backup.service`, and do not start a backup.
+- Do not change the live Immich machine at `192.168.0.182`, the Proxmox host, or the real photo and backup disks.

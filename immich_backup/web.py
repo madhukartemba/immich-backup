@@ -27,9 +27,10 @@ SHELL = """<!DOCTYPE html>
   input, select { width:100%; margin-top: 6px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line);
     background:#0e1410; color: var(--text); font: inherit; }
   button, a.btn { margin-top: 18px; border:0; border-radius: 999px; padding: 12px 16px; background: var(--lime);
-    color:#14200c; font: inherit; cursor: pointer; text-decoration:none; display:inline-block; }
+    color:#14200c; font: inherit; font-weight: 650; cursor: pointer; text-decoration:none; display:inline-block; }
   button.quiet { margin-left: 8px; background: transparent; color: var(--text); border: 1px solid var(--line); }
   .error { color: var(--red); min-height: 1.2em; }
+  .error.ok { color: #7ddea0; }
   .steps { display:flex; gap:8px; margin-top: 18px; }
   .steps span { padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); font-size: 12px; }
   .steps .on { color:#14200c; background: var(--lime); border-color: transparent; }
@@ -329,6 +330,11 @@ SETTINGS = page(
       fillDrive(document.querySelector("#drives [name=backup]"), rows, data.backup);
       showSleep(data);
     });
+    function mark(id, text, ok) {
+      const node = document.getElementById(id);
+      node.textContent = text;
+      node.classList.toggle("ok", !!ok);
+    }
     document.getElementById("drives").onsubmit = async (event) => {
       event.preventDefault();
       const form = new FormData(event.target);
@@ -336,8 +342,8 @@ SETTINGS = page(
         await post("/api/settings/drives", { photos: form.get("photos"), backup: form.get("backup") });
         const again = await fetch("/api/settings").then((response) => response.json());
         showSleep(again);
-        document.getElementById("drive-error").textContent = "Saved";
-      } catch (error) { document.getElementById("drive-error").textContent = error.message; }
+        mark("drive-error", "Saved", true);
+      } catch (error) { mark("drive-error", error.message, false); }
     };
     document.getElementById("alerts").onsubmit = async (event) => {
       event.preventDefault();
@@ -350,8 +356,8 @@ SETTINGS = page(
           stop_free_gb: Number(form.get("stop_free_gb")),
           warn_gb: form.get("warn_gb")
         });
-        document.getElementById("alert-error").textContent = "Saved";
-      } catch (error) { document.getElementById("alert-error").textContent = error.message; }
+        mark("alert-error", "Saved", true);
+      } catch (error) { mark("alert-error", error.message, false); }
     };
     document.getElementById("sleep").onsubmit = async (event) => {
       event.preventDefault();
@@ -361,8 +367,8 @@ SETTINGS = page(
           enabled: form.get("spindown_enabled") === "on",
           idle_minutes: Number(form.get("idle_minutes"))
         });
-        document.getElementById("sleep-error").textContent = "Saved";
-      } catch (error) { document.getElementById("sleep-error").textContent = error.message; }
+        mark("sleep-error", "Saved", true);
+      } catch (error) { mark("sleep-error", error.message, false); }
     };
     document.getElementById("password").onsubmit = async (event) => {
       event.preventDefault();

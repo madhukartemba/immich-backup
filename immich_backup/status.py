@@ -126,7 +126,7 @@ PAGE = r"""<!DOCTYPE html>
   .tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
   .recover .tools { margin-top: 0; }
   button, .btn {
-    border: 0; border-radius: 999px; padding: 10px 14px; font: inherit; font-size: 14px;
+    border: 0; border-radius: 999px; padding: 10px 14px; font: inherit; font-size: 14px; font-weight: 650;
     background: var(--lime); color: #14200c; text-decoration: none; cursor: pointer;
   }
   button.quiet, a.quiet { background: transparent; color: var(--text); border: 1px solid var(--line); }
@@ -692,6 +692,22 @@ def immich_up():
         return False
 
 
+def stale_space_failure(line, avail):
+    """A free-space refusal that the current limit and free space no longer justify."""
+    if " FAILED " not in (" " + line):
+        return False
+    if "free on the backup disk" not in line and "not enough free space" not in line:
+        return False
+    limit = C.initial_free_gb if "not enough free space for the initial backup" in line else C.stop_free_gb
+    if limit <= 0:
+        return True
+    return (avail or 0) >= limit * (1024 ** 3)
+
+
+def without_stale_space_failures(lines, avail):
+    return [line for line in lines if not stale_space_failure(line, avail)]
+
+
 def failure_text(lines):
     kind = ""
     reason = ""
@@ -729,12 +745,13 @@ def status():
     proc = borg_running()
     full_log = read_log_all()
     log = full_log[-14:]
-    last = log[-1] if log else ""
+    shown = without_stale_space_failures(full_log, backup.get("avail"))
+    last = shown[-1] if shown else ""
     _, process_text, _ = run(["ps", "-eo", "args="])
     pending = pending_command(full_log, process_text)
     _, active, _ = run(["systemctl", "is-active", C.backup_service])
     active = active.strip()
-    kind, reason = failure_text(full_log)
+    kind, reason = failure_text(shown)
     backup_alive = bool(proc) or active == "activating" or listed_command(process_text, "backup") or pending == "backup"
 
     if restore_in_progress(full_log) or listed_command(process_text, "restore") or pending == "restore":
@@ -758,7 +775,7 @@ def status():
         headline = "Restore failed" if kind == "restore" else "Backup failed"
         detail = reason or "The last attempt did not finish."
     else:
-        job, result = latest_outcome(full_log)
+        job, result = latest_outcome(shown)
         if job == "check" and result == "passed":
             state, headline, detail = "ok", "Repository is healthy", "The integrity check passed."
         elif job == "check" and result == "failed":
@@ -768,7 +785,11 @@ def status():
         elif job == "backup" and result == "ok":
             state, headline, detail = "ok", "Up to date", "Backup finished."
         elif job == "backup" and result == "warning":
-            state, headline, detail = "ok", "Finished with a warning", "The archive was saved, with a warning."
+            detail = "The archive was saved, with a warning."
+            for line in shown:
+                if "borg warning " in line:
+                    detail = line.split("borg warning ", 1)[1].strip()[:240]
+            state, headline = "ok", "Finished with a warning"
         elif job == "restore" and result == "ok":
             state, headline, detail = "ok", "Restored", "Immich was restored from the backup."
         elif result == "failed":

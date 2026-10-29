@@ -60,6 +60,19 @@ def repo_has_data(repo):
     return False
 
 
+def borg_warning(text):
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    changed = [line for line in lines if "changed" in line.lower()]
+    if len(changed) == 1:
+        return changed[0][:220]
+    if changed:
+        return str(len(changed)) + " files changed while being copied"
+    for line in reversed(lines):
+        if "warning" in line.lower():
+            return line[:220]
+    return "a file changed while being copied"
+
+
 def space_note(cfg, free_kb):
     free_gb = free_kb / 1024 / 1024
     for limit in sorted(cfg.warn_gb):
@@ -165,9 +178,13 @@ def run(cfg):
             cfg.media_mount, cfg.dump, cfg.compose, cfg.env_file,
         ],
         env=borg_env(cfg),
+        text=True,
+        capture_output=True,
     )
     rc = create.returncode
     log(cfg, "borg create exit " + str(rc))
+    if rc == 1:
+        log(cfg, "borg warning " + borg_warning(create.stderr))
     if rc >= 2:
         fail(cfg, "borg create failed with exit " + str(rc))
     prune_rc = 0

@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from immich_backup.backup import space_note
+from immich_backup.backup import borg_warning, space_note
 from immich_backup.config import load
 from immich_backup.health import during_backup
 from immich_backup.install import write_units
@@ -17,6 +17,7 @@ from immich_backup.status import (
     listed_command,
     local_iso,
     space_level,
+    without_stale_space_failures,
 )
 
 
@@ -52,6 +53,28 @@ class AppTests(unittest.TestCase):
         cfg.stop_free_gb = 0
         configure(cfg)
         self.assertEqual(space_level({"mount_ok": True, "avail": 1024 ** 3}), ("low", 10))
+
+    def test_raising_the_free_space_stop_clears_that_failure(self):
+        cfg = load(os.path.join(ROOT, "config.vm.example.ini"))
+        lines = [
+            "2026-10-29T09:00:21+00:00 borg create exit 0",
+            "2026-10-29T09:11:30+00:00 FAILED less than 10 GB free on the backup disk",
+        ]
+        cfg.stop_free_gb = 10
+        configure(cfg)
+        self.assertEqual(latest_outcome(without_stale_space_failures(lines, 9 * 1024 ** 3)), ("backup", "failed"))
+        cfg.stop_free_gb = 1
+        configure(cfg)
+        self.assertEqual(latest_outcome(without_stale_space_failures(lines, 9 * 1024 ** 3)), ("backup", "ok"))
+
+    def test_a_changed_file_is_described_as_a_warning(self):
+        text = "file changed while we backed it up: /mnt/immich-media/encoded-video/clip.mp4\n"
+        self.assertIn("changed", borg_warning(text))
+        many = "\n".join(
+            "file changed while we backed it up: /mnt/immich-media/encoded-video/%s.mp4" % n
+            for n in range(3)
+        )
+        self.assertEqual(borg_warning(many), "3 files changed while being copied")
 
     def test_warning_exit_counts_as_a_finished_backup(self):
         cfg = load(os.path.join(ROOT, "config.vm.example.ini"))
