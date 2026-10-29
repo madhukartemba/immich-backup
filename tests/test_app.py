@@ -262,6 +262,88 @@ class AppTests(unittest.TestCase):
             self.assertEqual(drive_kind(os.path.join(tmp, "sdd"), sys_root), "hdd")
             self.assertEqual(drive_kind(os.path.join(tmp, "nvme0n1"), sys_root), "ssd")
 
+    def test_repository_check_shows_progress_and_can_be_stopped(self):
+        from immich_backup.actions import cancel_check, re_check
+        from immich_backup.check import parse_progress, run
+        parsed = parse_progress('{"type":"progress_percent","message":"Checking segments","current":10,"total":40}')
+        self.assertEqual(parsed["percent"], 25)
+        self.assertEqual(parsed["phase"], "Checking segments")
+        self.assertEqual(parse_progress("Remote: Verifying data 12.5%")["percent"], 12.5)
+        self.assertFalse(re_check("borg create --progress /repo"))
+        self.assertTrue(re_check("borg check --progress --log-json /repo"))
+        self.assertTrue(re_check("/usr/bin/python3 -m immich_backup check --config /etc/immich-backup/config.ini"))
+        self.assertEqual(latest_outcome(["2026-10-29T01:00:00+05:30 repository check cancelled"]), ("check", "cancelled"))
+        self.assertIn("Cancel check", PAGE)
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = SimpleNamespace(
+                state_dir=tmp,
+                log=os.path.join(tmp, "backup.log"),
+                backup_mount="/mnt/immich-backup",
+                backup_uuid="disk",
+                repo=os.path.join(tmp, "repo"),
+            )
+
+            class Proc:
+                def __init__(self, args, **_kwargs):
+                    self.args = args
+                    self.stderr = self
+                    self.lines = [
+                        '{"type":"progress_percent","message":"Checking segments","current":10,"total":40}\n',
+                        "",
+                    ]
+                    self.returncode = None
+                    self.terminated = False
+
+                def readline(self):
+                    return self.lines.pop(0) if self.lines else ""
+
+                def poll(self):
+                    return self.returncode
+
+                def terminate(self):
+                    self.terminated = True
+                    self.returncode = -15
+
+                def kill(self):
+                    self.returncode = -9
+
+                def wait(self, timeout=None):
+                    if self.returncode is None:
+                        self.returncode = 0
+                    return self.returncode
+
+            seen = []
+
+            def opener(args, **kwargs):
+                proc = Proc(args, **kwargs)
+                seen.append(args)
+                return proc
+
+            self.assertEqual(run(cfg, popen=opener, mounted_fn=lambda _cfg: True, busy_fn=lambda: False), 0)
+            self.assertEqual(seen[0][:4], ["borg", "check", "--progress", "--log-json"])
+            self.assertIsInstance(seen[0], list)
+            with open(cfg.log, encoding="utf-8") as fh:
+                self.assertIn("repository check passed", fh.read())
+
+            class Stopping(Proc):
+                def readline(self):
+                    raise AssertionError("cancel should stop before reading Borg")
+
+            def stopping_opener(args, **kwargs):
+                with open(os.path.join(tmp, "check-cancel"), "w", encoding="utf-8") as fh:
+                    fh.write("cancel\n")
+                return Stopping(args, **kwargs)
+
+            self.assertEqual(run(cfg, popen=stopping_opener, mounted_fn=lambda _cfg: True, busy_fn=lambda: False), 0)
+            with open(cfg.log, encoding="utf-8") as fh:
+                self.assertIn("repository check cancelled", fh.read())
+            stopped = []
+            cancel_check(cfg, job_fn=lambda: "check", stop_fn=lambda: stopped.append("stopped"))
+            self.assertEqual(stopped, ["stopped"])
+            with self.assertRaises(ValueError):
+                cancel_check(cfg, job_fn=lambda: "backup", stop_fn=lambda: stopped.append("no"))
+            self.assertEqual(stopped, ["stopped"])
+
     def test_hard_drive_sleeps_only_after_it_has_been_idle(self):
         cfg = SimpleNamespace(spindown_enabled=True, spindown_idle_seconds=600)
         self.assertFalse(should_standby(cfg, 100, "active/idle"))

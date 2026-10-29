@@ -43,6 +43,61 @@ def launcher(command):
     ]
 
 
+def _check_pids():
+    listed = subprocess.run(["ps", "-eo", "pid=,args="], text=True, capture_output=True)
+    pids = []
+    for line in listed.stdout.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        pid, _, args = text.partition(" ")
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        if re_check(args):
+            pids.append(int(pid))
+    return pids
+
+
+def re_check(args):
+    import re
+    return bool(
+        re.search(r"(?:^|\s)borg\s+check(?:\s|$)", args)
+        or re.search(r"(?:^|\s)immich_backup\s+check(?:\s|$)", args)
+    )
+
+
+def stop_check_processes():
+    listed = subprocess.run(
+        ["systemctl", "list-units", "--type=service", "--state=activating,active", "--no-legend", "immich-backup-check*"],
+        text=True,
+        capture_output=True,
+    )
+    for line in listed.stdout.splitlines():
+        name = line.split()[0] if line.split() else ""
+        if name == "immich-backup-check.service" or name.startswith("immich-backup-check-"):
+            subprocess.run(["systemctl", "stop", "--no-block", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for pid in _check_pids():
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            pass
+
+
+def cancel_check(cfg, job_fn=None, stop_fn=None):
+    """Stop a repository check. A backup or restore is left running."""
+    from immich_backup.status import active_job
+    if (job_fn or active_job)() != "check":
+        raise ValueError("No repository check is running")
+    os.makedirs(cfg.state_dir, exist_ok=True)
+    path = os.path.join(cfg.state_dir, "check-cancel")
+    tmp = path + "." + str(os.getpid()) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write("cancel\n")
+    os.replace(tmp, path)
+    (stop_fn or stop_check_processes)()
+    return "Stopping the repository check."
+
+
 def start(cfg, command):
     if command in {"backup", "restore"} and busy(cfg):
         if command == "restore":

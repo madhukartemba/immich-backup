@@ -300,16 +300,23 @@ function render(d) {
   $("last").textContent = last.at ? clock(last.at, false) : "None";
   $("lastsub").textContent = last.took ? "Finished in " + last.took : "No finished copy yet";
   const job = d.job || "";
+  const checking = job === "check";
   $("run").disabled = !!job;
-  $("checkrepo").disabled = !!job;
+  $("checkrepo").disabled = !!job && !checking;
+  $("checkrepo").textContent = checking ? "Cancel check" : "Check repository";
+  $("checkrepo").dataset.mode = checking ? "cancel" : "start";
   $("run").title = job ? "Wait until the " + job + " finishes" : "";
-  $("checkrepo").title = $("run").title;
+  $("checkrepo").title = checking ? "Stop this repository check" : $("run").title;
   $("settings").classList.toggle("off", job === "restore");
   $("settings").setAttribute("aria-disabled", job === "restore" ? "true" : "false");
   if (job === "restore") {
     $("barnote").textContent = "Backups, checks, and settings are paused until the restore finishes.";
   } else if (job === "download") {
     $("barnote").textContent = "Downloading an archive. Backups and checks wait until it finishes.";
+  } else if (d.pace) {
+    let note = d.pace;
+    if (d.eta_seconds) note += (note ? " · " : "") + "about " + duration(d.eta_seconds) + " left, around " + finishClock(d.eta_seconds);
+    $("barnote").textContent = note;
   } else if (d.state === "running" && d.bytes_per_sec) {
     const mb = d.bytes_per_sec / 1024 / 1024;
     let note = (mb >= 10 ? mb.toFixed(0) : mb.toFixed(1)) + " MB/s";
@@ -381,6 +388,9 @@ async function act(url, confirmText, button, yesLabel) {
     $("detail").textContent = data.message || data.error || "Reading the backup archives.";
     $("dot").className = "dot run";
     $("live").textContent = "Live";
+  } else if (url.endsWith("/cancel")) {
+    $("state").textContent = "Stopping";
+    $("detail").textContent = data.message || data.error || "Stopping the repository check.";
   }
   $("barnote").textContent = data.message || data.error || "";
   arm(300);
@@ -436,7 +446,13 @@ function diskPrompt(action) {
   return spinning ? "Check the repository now? The backup disk will spin up." : "Check the repository now?";
 }
 $("run").onclick = () => act("/api/actions/backup", diskPrompt("backup"), $("run"), "Start backup");
-$("checkrepo").onclick = () => act("/api/actions/check", diskPrompt("check"), $("checkrepo"), "Check repository");
+$("checkrepo").onclick = () => {
+  if ($("checkrepo").dataset.mode === "cancel") {
+    act("/api/actions/check/cancel", "Stop the repository check? It can be started again later.", $("checkrepo"), "Stop check");
+    return;
+  }
+  act("/api/actions/check", diskPrompt("check"), $("checkrepo"), "Check repository");
+};
 $("logout").onclick = () => act("/api/logout");
 async function tick() {
   try {
@@ -607,6 +623,7 @@ def open_job(line, job):
         or "repository check passed" in line
         or "repository check failed" in line
         or "repository check skipped" in line
+        or "repository check cancelled" in line
         or " FAILED " in padded
     ):
         return ""
@@ -643,6 +660,8 @@ def latest_outcome(lines):
             outcome = ("check", "failed")
         elif "repository check skipped" in line:
             outcome = ("check", "skipped")
+        elif "repository check cancelled" in line:
+            outcome = ("check", "cancelled")
         elif "restore finished" in line:
             outcome = ("restore", "ok")
         elif " FAILED " in (" " + line):
@@ -687,6 +706,7 @@ def launch_state(command, started, now, lines, process_text):
             or "repository check passed" in line
             or "repository check failed" in line
             or "repository check skipped" in line
+            or "repository check cancelled" in line
             or "restore finished" in line
             or " FAILED " in (" " + line)
         )
@@ -995,6 +1015,46 @@ def active_job(process_text=None, lines=None):
     return ""
 
 
+def check_progress(now=None):
+    """Percent, wording, and pace for a repository check Borg is reporting."""
+    path = os.path.join(C.state_dir, "check-progress")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("percent"), (int, float)):
+        return None
+    now = time.time() if now is None else now
+    started = data.get("started") if isinstance(data.get("started"), (int, float)) else now
+    elapsed = max(0.0, now - started)
+    percent = max(0.0, min(100.0, float(data["percent"])))
+    phase = str(data.get("phase") or "Checking repository")[:80]
+    current = data.get("current") if isinstance(data.get("current"), (int, float)) else None
+    total = data.get("total") if isinstance(data.get("total"), (int, float)) else None
+    bits = []
+    if current is not None and total:
+        unit = "segments" if "segment" in phase.lower() else "items"
+        bits.append("%s of %s %s" % (_count(current), _count(total), unit))
+        if elapsed >= 8 and current > 0:
+            bits.append("%s/s" % _count(current / elapsed))
+    eta = elapsed * (100.0 - percent) / percent if elapsed >= 8 and percent >= 1 else None
+    shown = ("%.0f" if percent >= 10 else "%.1f") % percent
+    return {
+        "percent": percent,
+        "detail": phase + ", " + shown + "%.",
+        "pace": " · ".join(bits),
+        "eta": eta,
+    }
+
+
+def _count(value):
+    number = float(value)
+    if number >= 10:
+        return "{:,}".format(int(round(number)))
+    return "%.1f" % number
+
+
 def status():
     backup_uuid, backup_target = mount_uuid(C.backup_mount)
     media_uuid, media_target = mount_uuid(C.media_mount)
@@ -1040,6 +1100,9 @@ def status():
         state = "running"
         headline = "Checking"
         detail = "Reading the backup archives."
+        reading = check_progress()
+        if reading:
+            detail = reading["detail"]
     elif active == "failed" or " FAILED " in (" " + last):
         state = "failed"
         headline = failure_headline(kind)
@@ -1052,6 +1115,8 @@ def status():
             state, headline, detail = "failed", "Check failed", "The repository check did not pass."
         elif job == "check" and result == "skipped":
             state, headline, detail = "ok", "Check skipped", "A backup was already running."
+        elif job == "check" and result == "cancelled":
+            state, headline, detail = "ok", "Check stopped", "The repository check was stopped before it finished."
         elif job == "backup" and result == "ok":
             state, headline, detail = "ok", "Up to date", "Backup finished."
         elif job == "backup" and result == "warning":
@@ -1073,8 +1138,18 @@ def status():
     progress = None
     rate = None
     eta = None
+    pace = ""
     if restore_alive:
         progress = restore_progress
+    elif headline == "Checking":
+        reading = check_progress()
+        if reading:
+            progress = reading["percent"]
+            eta = reading["eta"]
+            pace = reading["pace"]
+        else:
+            progress = 0
+            pace = "Measuring check speed"
     elif state == "running" and backup.get("used") and media.get("used"):
         progress = min(99.0, backup["used"] / media["used"] * 100.0)
         rate = write_rate(backup["used"])
@@ -1131,6 +1206,7 @@ def status():
         "archives_note": archives_note,
         "bytes_per_sec": rate,
         "eta_seconds": eta,
+        "pace": pace,
         "space": space[0],
         "space_under": space[1],
         "last_success": last_success(full_log),

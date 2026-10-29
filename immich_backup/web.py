@@ -872,6 +872,14 @@ def dispatch(handler, method):
             auth.change_password(status.C, str(data.get("current") or ""), str(data.get("new_password") or ""))
             send_json(handler, 200, {"ok": True}, clear_cookie())
             return True
+        if method == "POST" and path == "/api/actions/check/cancel":
+            if not require_user(handler):
+                return True
+            read_json(handler)
+            message = actions.cancel_check(status.C)
+            status.invalidate_cache()
+            send_json(handler, 200, {"ok": True, "message": message})
+            return True
         if method == "POST" and path in {"/api/actions/backup", "/api/actions/check"}:
             if not require_user(handler):
                 return True
