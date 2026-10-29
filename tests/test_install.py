@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from immich_backup.system_install import apply, main
+from immich_backup.system_install import ProcessRunner, apply, main
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +34,10 @@ class FakeRunner:
 
 
 class InstallerTests(unittest.TestCase):
+    def test_a_missing_command_means_it_is_not_installed(self):
+        result = ProcessRunner().run(["immich-backup-missing-command"])
+        self.assertEqual(result.returncode, 127)
+
     def test_machine_install_copies_the_program_and_docker_when_needed(self):
         runner = FakeRunner(docker=False)
         with tempfile.TemporaryDirectory(prefix="immich-backup-test-") as tmp:

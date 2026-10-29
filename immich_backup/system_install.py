@@ -81,7 +81,10 @@ HOST_PACKAGES = ("hdparm", "smartmontools")
 
 class ProcessRunner:
     def run(self, args, env=None):
-        return subprocess.run(args, env=env, capture_output=True)
+        try:
+            return subprocess.run(args, env=env, capture_output=True)
+        except FileNotFoundError:
+            return subprocess.CompletedProcess(args, 127, b"", b"")
 
 
 def rooted(prefix, path):
