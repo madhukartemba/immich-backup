@@ -1,8 +1,8 @@
 """Status page. It reads logs and saved files. It does not call borg or smartctl.
 
 A real hard-disk backup drive is asked for its power mode with hdparm -C,
-which leaves a standby disk asleep. An SSD is labeled SSD. A virtual disk
-is labeled Virtual. Neither of those is asked to spin.
+which leaves a standby disk asleep. If that answer is not trustworthy the
+card says HDD. An SSD is labeled SSD. A virtual disk is labeled Virtual.
 """
 
 import json
@@ -722,9 +722,10 @@ def clock_iso(text):
         return naive.replace(tzinfo=timezone.utc).isoformat(timespec="seconds")
     try:
         from zoneinfo import ZoneInfo
-        return naive.replace(tzinfo=ZoneInfo(zone)).isoformat(timespec="seconds")
+        aware = naive.replace(tzinfo=ZoneInfo(zone))
     except Exception:
-        return text
+        aware = naive.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return aware.isoformat(timespec="seconds")
 
 
 def local_iso(text):
@@ -763,10 +764,9 @@ def last_check(lines):
 
 
 def backup_spin(cfg, power_fn=None, kind_fn=None):
-    """Sleeping or Spinning for a real hard disk. An SSD or a virtual disk gets that word instead."""
-    from immich_backup.spindown import drive_kind, power_state, spin_label
+    """Sleeping or Spinning when the power check is real. Otherwise HDD, SSD, or Virtual."""
+    from immich_backup.spindown import disk_word, drive_kind, power_reading
     kind_fn = kind_fn or drive_kind
-    power_fn = power_fn or power_state
     dev = cfg.backup_disk
     if not dev:
         from immich_backup.health import device_for_mount
@@ -777,16 +777,18 @@ def backup_spin(cfg, power_fn=None, kind_fn=None):
         kind = kind_fn(dev)
     except OSError:
         return ""
-    if kind == "ssd":
-        return "SSD"
-    if kind == "virtual":
-        return "Virtual"
     if kind != "hdd":
-        return ""
+        return disk_word(kind)
+    if power_fn is not None:
+        try:
+            return disk_word(kind, power_fn(dev), True)
+        except FileNotFoundError:
+            return "HDD"
     try:
-        return spin_label(power_fn(dev))
+        state, reliable = power_reading(dev)
     except FileNotFoundError:
-        return ""
+        return "HDD"
+    return disk_word(kind, state, reliable)
 
 
 def space_level(backup):

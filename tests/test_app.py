@@ -8,7 +8,7 @@ from immich_backup.backup import borg_warning, space_note
 from immich_backup.config import load
 from immich_backup.health import device_from_source, during_backup
 from immich_backup.install import write_units
-from immich_backup.spindown import drive_kind, should_standby, spin_label
+from immich_backup.spindown import disk_word, drive_kind, should_standby, spin_label
 from immich_backup.status import PAGE, backup_spin
 from immich_backup.web import SETUP
 from immich_backup.status import (
@@ -127,6 +127,9 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result["at"], "2026-10-29T08:42:04+00:00")
         self.assertEqual(result["took"], "6 sec")
         self.assertEqual(clock_iso("Fri 2026-10-30 01:00:00 UTC"), "2026-10-30T01:00:00+00:00")
+        ist = clock_iso("Fri 2026-10-30 01:00:00 IST")
+        self.assertTrue(ist.startswith("2026-10-30T01:00:00"))
+        self.assertNotIn("IST", ist)
         shown = local_iso("Thu, 2026-10-29 08:41:59")
         self.assertTrue(shown.startswith("2026-10-29T08:41:59"))
         self.assertIsNotNone(__import__("datetime").datetime.fromisoformat(shown).tzinfo)
@@ -216,6 +219,9 @@ class AppTests(unittest.TestCase):
         self.assertEqual(spin_label("sleeping"), "Sleeping")
         self.assertEqual(spin_label("active/idle"), "Spinning")
         self.assertEqual(spin_label("unknown"), "")
+        self.assertEqual(disk_word("hdd", "standby", False), "HDD")
+        self.assertEqual(disk_word("hdd", "active/idle", True), "Spinning")
+        self.assertEqual(disk_word("ssd"), "SSD")
         self.assertNotIn("confirm(", PAGE)
         self.assertNotIn("confirm(", SETUP)
         self.assertIn('id="spin"', PAGE)
@@ -243,7 +249,7 @@ class AppTests(unittest.TestCase):
             self._write_drive(tmp, "sdd", "ATA", "TOSHIBA MG08ADA800E", "1")
             self._write_drive(tmp, "nvme0n1", "", "Samsung SSD 970 EVO", "0")
             sys_root = os.path.join(tmp, "sys")
-            self.assertEqual(drive_kind(os.path.join(tmp, "sdc"), sys_root), "virtual")
+            self.assertEqual(drive_kind(os.path.join(tmp, "sdc"), sys_root), "hdd")
             self.assertEqual(drive_kind(os.path.join(tmp, "sdd"), sys_root), "hdd")
             self.assertEqual(drive_kind(os.path.join(tmp, "nvme0n1"), sys_root), "ssd")
 

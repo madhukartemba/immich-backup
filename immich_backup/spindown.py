@@ -19,16 +19,30 @@ def diskstats(name):
     return ""
 
 
-def power_state(dev):
-    """hdparm -C reads the power mode and leaves a standby disk asleep."""
+def power_reading(dev):
+    """Return the hdparm -C state and whether it can be trusted.
+
+    The check leaves a standby disk asleep. A disk behind QEMU often answers
+    with a sense error, and that standby reading is not real.
+    """
     try:
         proc = subprocess.run(["hdparm", "-C", dev], text=True, capture_output=True)
     except FileNotFoundError:
-        return ""
-    for line in (proc.stdout + "\n" + proc.stderr).splitlines():
+        return "", False
+    blob = proc.stdout + "\n" + proc.stderr
+    state = ""
+    for line in blob.splitlines():
         if "drive state" in line:
-            return line.split(":", 1)[1].replace(" ", "")
-    return ""
+            state = line.split(":", 1)[1].replace(" ", "")
+            break
+    reliable = bool(state) and proc.returncode == 0 and "sg_io" not in blob.lower()
+    return state, reliable
+
+
+def power_state(dev):
+    """hdparm -C reads the power mode and leaves a standby disk asleep."""
+    state, _reliable = power_reading(dev)
+    return state
 
 
 def _sys_text(path):
@@ -60,13 +74,14 @@ def drive_kind(dev, sys_root="/sys"):
         + " "
         + _sys_text(os.path.join(base, "device", "model"))
     ).lower()
-    if any(mark in identity for mark in ("qemu", "vmware", "virtualbox", "vbox", "virtual disk", "virtual hd")):
-        return "virtual"
+    virtual = any(mark in identity for mark in ("qemu", "vmware", "virtualbox", "vbox", "virtual disk", "virtual hd"))
     rota = _sys_text(os.path.join(base, "queue", "rotational"))
     if rota == "0":
         return "ssd"
     if rota == "1":
         return "hdd"
+    if virtual:
+        return "virtual"
     return ""
 
 
@@ -77,6 +92,19 @@ def spin_label(power):
     if text == "active/idle":
         return "Spinning"
     return ""
+
+
+def disk_word(kind, state="", reliable=True):
+    """Corner label for the backup disk. An untrusted power reading stays HDD."""
+    if kind == "ssd":
+        return "SSD"
+    if kind == "virtual":
+        return "Virtual"
+    if kind != "hdd":
+        return ""
+    if not reliable:
+        return "HDD"
+    return spin_label(state) or "HDD"
 
 
 def should_standby(cfg, idle_seconds, power):
