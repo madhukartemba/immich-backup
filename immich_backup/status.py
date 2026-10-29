@@ -1,4 +1,8 @@
-"""Status page. It reads logs and saved files. It does not call borg or smartctl."""
+"""Status page. It reads logs and saved files. It does not call borg or smartctl.
+
+A rotational backup disk is asked for its power mode with hdparm -C, which
+leaves a standby disk asleep.
+"""
 
 import json
 import os
@@ -101,6 +105,15 @@ PAGE = r"""<!DOCTYPE html>
   }
   .card { padding: 18px 18px 16px; }
   .card span, .panel h2 { color: var(--muted); font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; }
+  .cardhead { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .spin.up { color: var(--lime); }
+  .spin.down { color: var(--ok); }
+  .spin[hidden] { display: none; }
+  .modal { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(6, 8, 7, .72); }
+  .modal[hidden] { display: none; }
+  .sheet { width: min(420px, 100%); padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: #171e19; }
+  .sheet p { margin: 0 0 18px; color: var(--text); font-size: 16px; line-height: 1.45; }
+  .sheet .tools { margin-top: 0; }
   .card strong { display: block; margin-top: 10px; font-size: 28px; font-variant-numeric: tabular-nums; letter-spacing: -0.03em; }
   .card em { display: block; margin-top: 6px; color: var(--muted); font-style: normal; font-size: 13px; }
   .card em:empty { display: none; }
@@ -175,7 +188,7 @@ PAGE = r"""<!DOCTYPE html>
       </div>
     </section>
     <section class="grid">
-      <article class="card"><span>Backup disk</span><strong id="disk">—</strong><em id="disksub">Backup disk</em><em id="diskhealth">SMART</em></article>
+      <article class="card"><div class="cardhead"><span>Backup disk</span><span id="spin" class="spin" hidden></span></div><strong id="disk">—</strong><em id="disksub">Backup disk</em><em id="diskhealth">SMART</em></article>
       <article class="card"><span>Library</span><strong id="lib">—</strong><em id="libsub">Photos and videos</em><em id="libhealth">SMART</em></article>
       <article class="card"><span>Next run</span><strong id="next">—</strong><em id="elapsed">Nightly at 01:00</em><em id="check">Repository check</em></article>
       <article class="card"><span>Last success</span><strong id="last">—</strong><em id="lastsub">No finished copy yet</em></article>
@@ -190,6 +203,15 @@ PAGE = r"""<!DOCTYPE html>
         <pre id="log">No log yet.</pre>
       </article>
     </section>
+  </div>
+  <div id="modal" class="modal" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="modal-text">
+      <p id="modal-text"></p>
+      <div class="tools">
+        <button id="modal-yes" type="button">Continue</button>
+        <button id="modal-no" class="quiet" type="button">Cancel</button>
+      </div>
+    </div>
   </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -258,6 +280,10 @@ function render(d) {
   $("diskhealth").className = smart.backup && smart.backup.checked_at && !smart.backup.ok ? "bad" : "";
   $("libhealth").textContent = smartLine(smart.primary);
   $("libhealth").className = smart.primary && smart.primary.checked_at && !smart.primary.ok ? "bad" : "";
+  const spin = $("spin");
+  spin.textContent = d.spin || "";
+  spin.hidden = !d.spin;
+  spin.className = "spin" + (d.spin === "Sleeping" ? " down" : d.spin === "Spinning" ? " up" : "");
   const m = d.media || {};
   $("lib").textContent = gb(m.used);
   $("libsub").textContent = m.mount_ok ? gb(m.avail) + " free of " + gb(m.size) : "Photo disk is not mounted";
@@ -315,9 +341,30 @@ function render(d) {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
 }
-async function act(url, confirmText, button) {
+function ask(message, yesLabel) {
+  const modal = $("modal");
+  $("modal-text").textContent = message;
+  $("modal-yes").textContent = yesLabel || "Continue";
+  modal.hidden = false;
+  $("modal-no").focus();
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      modal.hidden = true;
+      $("modal-yes").onclick = null;
+      $("modal-no").onclick = null;
+      modal.onclick = null;
+      document.onkeydown = null;
+      resolve(value);
+    };
+    $("modal-yes").onclick = () => finish(true);
+    $("modal-no").onclick = () => finish(false);
+    modal.onclick = (event) => { if (event.target === modal) finish(false); };
+    document.onkeydown = (event) => { if (event.key === "Escape") finish(false); };
+  });
+}
+async function act(url, confirmText, button, yesLabel) {
   if (button && button.disabled) return;
-  if (confirmText && !confirm(confirmText)) return;
+  if (confirmText && !await ask(confirmText, yesLabel)) return;
   if (button) { $("run").disabled = true; $("checkrepo").disabled = true; }
   const response = await fetch(url, { method: "POST", headers: { "X-Immich-Backup": "1" } });
   if (response.status === 401) { location.href = "/login"; return; }
@@ -381,8 +428,8 @@ $("archives").addEventListener("click", (event) => {
   if (!button || button.disabled) return;
   downloadArchive(button.getAttribute("data-archive"));
 });
-$("run").onclick = () => act("/api/actions/backup", "Start a backup now? The backup disk will spin up.", $("run"));
-$("checkrepo").onclick = () => act("/api/actions/check", "Check the repository now? The backup disk will spin up.", $("checkrepo"));
+$("run").onclick = () => act("/api/actions/backup", "Start a backup now? The backup disk will spin up.", $("run"), "Start backup");
+$("checkrepo").onclick = () => act("/api/actions/check", "Check the repository now? The backup disk will spin up.", $("checkrepo"), "Check repository");
 $("logout").onclick = () => act("/api/logout");
 async function tick() {
   try {
@@ -706,6 +753,21 @@ def last_check(lines):
     if active.strip() in {"activating", "active"} or borg_check_running():
         state = "running"
     return {"state": state or "unknown", "at": at}
+
+
+def backup_spin(cfg, power_fn=None):
+    """Spinning or Sleeping for a hard-disk backup drive. hdparm -C does not wake it."""
+    if not cfg.backup_rotational:
+        return ""
+    from immich_backup.spindown import power_state, spin_label
+    power_fn = power_fn or power_state
+    dev = cfg.backup_disk
+    if not dev:
+        from immich_backup.health import device_for_mount
+        dev = device_for_mount(cfg.backup_mount)
+    if not dev or not os.path.exists(dev):
+        return ""
+    return spin_label(power_fn(dev))
 
 
 def space_level(backup):
@@ -1047,6 +1109,7 @@ def status():
         "check": check,
         "immich": "up" if immich_up() else "down",
         "smart": load_smart(),
+        "spin": backup_spin(C),
         "failure": reason if state == "failed" else "",
         "failure_kind": kind if state == "failed" else "",
         "updated": datetime.now().astimezone().isoformat(timespec="seconds"),

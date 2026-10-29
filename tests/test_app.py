@@ -8,7 +8,9 @@ from immich_backup.backup import borg_warning, space_note
 from immich_backup.config import load
 from immich_backup.health import device_from_source, during_backup
 from immich_backup.install import write_units
-from immich_backup.spindown import should_standby
+from immich_backup.spindown import should_standby, spin_label
+from immich_backup.status import PAGE, backup_spin
+from immich_backup.web import SETUP
 from immich_backup.status import (
     clock_iso,
     configure,
@@ -194,6 +196,35 @@ class AppTests(unittest.TestCase):
             with open(cfg.smart_file, encoding="utf-8") as fh:
                 saved = json.load(fh)
             self.assertEqual(saved["primary"]["summary"], "SMART is not available for this disk")
+
+    def test_spin_state_uses_only_the_power_check(self):
+        self.assertEqual(spin_label("standby"), "Sleeping")
+        self.assertEqual(spin_label("sleeping"), "Sleeping")
+        self.assertEqual(spin_label("active/idle"), "Spinning")
+        self.assertEqual(spin_label("unknown"), "")
+        self.assertNotIn("confirm(", PAGE)
+        self.assertNotIn("confirm(", SETUP)
+        self.assertIn('id="spin"', PAGE)
+        self.assertIn('id="modal"', PAGE)
+        self.assertIn('id="modal"', SETUP)
+        with tempfile.TemporaryDirectory() as tmp:
+            disk = os.path.join(tmp, "disk")
+            open(disk, "w", encoding="utf-8").close()
+            seen = []
+
+            def power(dev):
+                seen.append(dev)
+                return "standby"
+
+            cfg = SimpleNamespace(backup_rotational=False, backup_disk=disk, backup_mount="/mnt/nowhere")
+            self.assertEqual(backup_spin(cfg, power), "")
+            self.assertEqual(seen, [])
+            cfg.backup_rotational = True
+            self.assertEqual(backup_spin(cfg, power), "Sleeping")
+            self.assertEqual(seen, [disk])
+            cfg.backup_disk = os.path.join(tmp, "missing")
+            self.assertEqual(backup_spin(cfg, power), "")
+            self.assertEqual(seen, [disk])
 
     def test_hard_drive_sleeps_only_after_it_has_been_idle(self):
         cfg = SimpleNamespace(spindown_enabled=True, spindown_idle_seconds=600)

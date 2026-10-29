@@ -20,10 +20,20 @@ def diskstats(name):
 
 
 def power_state(dev):
+    """hdparm -C reads the power mode and leaves a standby disk asleep."""
     proc = subprocess.run(["hdparm", "-C", dev], text=True, capture_output=True)
     for line in (proc.stdout + "\n" + proc.stderr).splitlines():
         if "drive state" in line:
             return line.split(":", 1)[1].replace(" ", "")
+    return ""
+
+
+def spin_label(power):
+    text = (power or "").lower().replace(" ", "")
+    if text in {"standby", "sleeping"}:
+        return "Sleeping"
+    if text == "active/idle":
+        return "Spinning"
     return ""
 
 

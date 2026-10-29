@@ -31,6 +31,11 @@ SHELL = """<!DOCTYPE html>
     color:#14200c; font: inherit; font-weight: 650; cursor: pointer; text-decoration:none; display:inline-block; }
   button.quiet { margin-left: 8px; background: transparent; color: var(--text); border: 1px solid var(--line); }
   button:disabled, select:disabled, input:disabled { opacity: .38; cursor: not-allowed; }
+  .modal { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(6, 8, 7, .72); }
+  .modal[hidden] { display: none; }
+  .sheet { width: min(420px, 100%); margin: 0; padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: #171e19; }
+  .sheet p { margin: 0 0 4px; color: var(--text); font-size: 16px; line-height: 1.45; }
+  .sheet .tools { display: flex; gap: 8px; }
   .error { color: var(--red); min-height: 1.2em; }
   .error.ok { color: #7ddea0; }
   .steps { display:flex; gap:8px; margin-top: 18px; }
@@ -46,6 +51,15 @@ SHELL = """<!DOCTYPE html>
   <div class="brand" style="letter-spacing:.16em;text-transform:uppercase;color:var(--muted);font-size:13px"><b style="color:var(--text)">Immich</b> backup</div>
   __BODY__
 </main>
+<div id="modal" class="modal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="modal-text">
+    <p id="modal-text"></p>
+    <div class="tools">
+      <button id="modal-yes" type="button">Continue</button>
+      <button id="modal-no" class="quiet" type="button">Cancel</button>
+    </div>
+  </div>
+</div>
 <script>
 async function post(url, body) {
   const response = await fetch(url, {
@@ -60,6 +74,29 @@ async function post(url, body) {
 function showError(error) {
   const node = document.querySelector("form:not(.hidden) .error") || document.querySelector(".error");
   if (node) node.textContent = error.message || "Request failed";
+}
+function ask(message, yesLabel) {
+  const modal = document.getElementById("modal");
+  const yes = document.getElementById("modal-yes");
+  const no = document.getElementById("modal-no");
+  document.getElementById("modal-text").textContent = message;
+  yes.textContent = yesLabel || "Continue";
+  modal.hidden = false;
+  no.focus();
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      modal.hidden = true;
+      yes.onclick = null;
+      no.onclick = null;
+      modal.onclick = null;
+      document.onkeydown = null;
+      resolve(value);
+    };
+    yes.onclick = () => finish(true);
+    no.onclick = () => finish(false);
+    modal.onclick = (event) => { if (event.target === modal) finish(false); };
+    document.onkeydown = (event) => { if (event.key === "Escape") finish(false); };
+  });
 }
 __SCRIPT__
 </script>
@@ -269,7 +306,9 @@ SETUP = page(
         showError(new Error("The photo drive and backup drive must be different"));
         return;
       }
-      if (!confirm("Restore " + form.get("archive") + " onto " + form.get("photos") + "? Immich on this machine is replaced.")) return;
+      const photos = form.get("photos");
+      const archive = form.get("archive");
+      if (!await ask("Restore " + archive + " onto " + photos + "? Immich on this machine is replaced.", "Restore")) return;
       document.getElementById("restore-go").disabled = true;
       try {
         const data = await post("/api/setup/restore", {
