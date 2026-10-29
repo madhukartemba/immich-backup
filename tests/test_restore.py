@@ -4,9 +4,11 @@ Docker, Borg, apt, and the machine's disks are never called. The temporary
 directory is removed when the test ends.
 """
 
+import itertools
 import json
 import os
 import stat
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,13 +16,15 @@ from unittest.mock import patch
 from immich_backup.config import load
 from immich_backup.restore import (
     ARCHIVE_RE,
+    ProcessRunner,
     assert_safe,
     find_layout,
+    last_error,
     list_archives,
     os_identity,
     run,
 )
-from immich_backup.status import restore_in_progress, failure_text
+from immich_backup.status import active_job, configure, failure_text, restore_in_progress, restore_step
 
 
 SECRET = "SECRET_DB_PASSWORD"
@@ -144,8 +148,16 @@ class RestoreTests(unittest.TestCase):
                 fh.write('ID=debian\nVERSION_CODENAME=trixie\n')
             prefix = os.path.join(tmp, "aptroot")
             runner = FakeRunner()
-            with patch("immich_backup.restore.confirm_mounted"):
+            with patch("immich_backup.restore.confirm_mounted"), \
+                    patch("immich_backup.restore.immich_answers", return_value=True) as answered, \
+                    patch("immich_backup.restore.refresh_archives"):
                 self.assertEqual(run(cfg, runner, release, prefix), 0)
+            answered.assert_called()
+            up = [index for index, call in enumerate(runner.calls) if call[-2:] == ["up", "-d"]]
+            loaded = [index for index, call in enumerate(runner.calls) if "psql" in call]
+            self.assertTrue(up and loaded and loaded[0] < up[0])
+            mounts = [call for call in runner.calls if call[:2] == ["borg", "mount"]]
+            self.assertTrue(mounts[0][-1].startswith(cfg.state_dir))
             joined = [" ".join(call) for call in runner.calls]
             self.assertIn("apt-get install -y ca-certificates curl gnupg rsync borgbackup", joined)
             self.assertIn(
@@ -190,11 +202,66 @@ class RestoreTests(unittest.TestCase):
                 fh.write("ID=debian\nVERSION_CODENAME=trixie\n")
             runner = FakeRunner()
             runner.missing = False
-            with patch("immich_backup.restore.confirm_mounted"):
+            with patch("immich_backup.restore.confirm_mounted"), \
+                    patch("immich_backup.restore.immich_answers", return_value=True), \
+                    patch("immich_backup.restore.refresh_archives"):
                 run(cfg, runner, release, os.path.join(tmp, "aptroot"))
             self.assertFalse(any(call[0] == "apt-get" for call in runner.calls))
             with open(cfg.log, encoding="utf-8") as fh:
                 self.assertIn("already installed", fh.read())
+
+    def test_an_unexpected_error_is_logged_as_a_failed_restore(self):
+        with tempfile.TemporaryDirectory(prefix="immich-backup-test-") as tmp:
+            cfg = load(write_config(tmp))
+            runner = FakeRunner()
+            runner.missing = False
+
+            def broken(*_args, **_kwargs):
+                raise ValueError("flush of closed file")
+
+            runner.run_input = broken
+            with patch("immich_backup.restore.confirm_mounted"), \
+                    patch("immich_backup.restore.wait_database"), \
+                    patch("immich_backup.restore.immich_answers", return_value=True):
+                with self.assertRaises(SystemExit):
+                    run(cfg, runner, os.path.join(tmp, "missing"), os.path.join(tmp, "aptroot"))
+            with open(cfg.log, encoding="utf-8") as fh:
+                logged = fh.read()
+            self.assertIn("FAILED restore stopped unexpectedly: ValueError flush of closed file", logged)
+            self.assertNotIn("restore finished", logged)
+            self.assertTrue(any(call[:2] == ["borg", "umount"] for call in runner.calls))
+            self.assertFalse(restore_in_progress(logged.splitlines()))
+
+    def test_immich_must_answer_before_the_restore_is_finished(self):
+        with tempfile.TemporaryDirectory(prefix="immich-backup-test-") as tmp:
+            cfg = load(write_config(tmp))
+            runner = FakeRunner()
+            runner.missing = False
+            with patch("immich_backup.restore.confirm_mounted"), \
+                    patch("immich_backup.restore.wait_database"), \
+                    patch("immich_backup.restore.immich_answers", return_value=False), \
+                    patch("immich_backup.restore.time.sleep"), \
+                    patch("immich_backup.restore.time.monotonic", side_effect=itertools.count(0, 500)):
+                with self.assertRaises(SystemExit):
+                    run(cfg, runner, os.path.join(tmp, "missing"), os.path.join(tmp, "aptroot"))
+            with open(cfg.log, encoding="utf-8") as fh:
+                logged = fh.read()
+            self.assertIn("FAILED Immich started but did not answer", logged)
+            self.assertNotIn("restore finished", logged)
+
+    def test_the_database_loader_feeds_every_line_and_survives_an_early_exit(self):
+        counted = ProcessRunner().run_input(
+            [sys.executable, "-c", "import sys; print(len(sys.stdin.buffer.read()))"],
+            (b"x" * 1000 for _ in range(500)),
+        )
+        self.assertEqual(counted.returncode, 0)
+        self.assertEqual(counted.stdout.strip(), b"500000")
+        quit_early = ProcessRunner().run_input(
+            [sys.executable, "-c", "import sys; sys.stderr.write('ERROR: relation exists\\n'); sys.exit(3)"],
+            (b"x" * 65536 for _ in range(200)),
+        )
+        self.assertEqual(quit_early.returncode, 3)
+        self.assertEqual(last_error(quit_early.stderr), "ERROR: relation exists")
 
     def test_archive_list_keeps_only_immich_names(self):
         with tempfile.TemporaryDirectory(prefix="immich-backup-test-") as tmp:
@@ -233,6 +300,28 @@ class RestoreTests(unittest.TestCase):
         lines.append("2026-10-29T03:00:00+05:30 starting restore of " + ARCHIVE)
         lines.append("2026-10-29T03:01:00+05:30 FAILED database restore failed")
         self.assertFalse(restore_in_progress(lines))
+
+    def test_restore_steps_move_the_progress_bar(self):
+        lines = ["2026-10-29T01:00:00+00:00 starting restore of " + ARCHIVE]
+        self.assertEqual(restore_step(lines)[0], 2)
+        self.assertEqual(restore_step(lines)[2], ARCHIVE)
+        lines.append("2026-10-29T01:01:00+00:00 restored Immich configuration")
+        self.assertIn("photo library", restore_step(lines)[1])
+        lines.append("2026-10-29T01:02:00+00:00 restore step loading the database")
+        self.assertEqual(restore_step(lines)[0], 80)
+        lines.append("2026-10-29T01:03:00+00:00 restore step waiting for Immich")
+        self.assertEqual(restore_step(lines)[0], 95)
+        lines.append("2026-10-29T01:04:00+00:00 starting local borg create")
+        self.assertFalse(restore_in_progress(lines))
+
+    def test_a_running_restore_is_seen_from_its_process(self):
+        with tempfile.TemporaryDirectory(prefix="immich-backup-test-") as tmp:
+            configure(load(write_config(tmp)))
+            lines = ["2026-10-29T01:00:00+00:00 starting restore of " + ARCHIVE]
+            running = "/usr/bin/python3 -m immich_backup restore --config /etc/immich-backup/config.ini\n"
+            self.assertEqual(active_job(running, lines), "restore")
+            self.assertEqual(active_job("", lines), "")
+            self.assertEqual(active_job("borg create ::x /mnt\n", []), "backup")
 
     def test_failure_reason_names_the_job(self):
         restore_lines = [

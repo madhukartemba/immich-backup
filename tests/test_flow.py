@@ -319,6 +319,35 @@ class FlowTests(unittest.TestCase):
         self.started.assert_not_called()
         self.assertEqual(load(self.cfg_path).restore_archive, "")
         self.assertFalse(os.path.exists(os.path.join(self.backup, ".backup-disk")))
+        status, rows = self.client.json("GET", "/api/disks")
+        self.assertNotIn("has_repo", rows[1])
+        status, body = self.client.json("POST", "/api/setup/restore", {
+            "photos": self.photos,
+            "backup": self.backup,
+            "archive": "immich-2026-10-27_020011",
+            "email": "alerts@example.com",
+            "confirm": "restore",
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("no Immich backup", body["error"])
+        self.started.assert_not_called()
+        os.makedirs(os.path.join(self.backup, "immich-borg"))
+        with open(os.path.join(self.backup, "immich-borg", "config"), "w", encoding="utf-8") as fh:
+            fh.write("[repository]\n")
+        status, rows = self.client.json("GET", "/api/disks?repo=1")
+        self.assertEqual({row["mount"]: row["has_repo"] for row in rows}[self.backup], True)
+        self.assertEqual({row["mount"]: row["has_repo"] for row in rows}[self.photos], False)
+        with patch("immich_backup.web.status.active_job", return_value="backup"):
+            status, body = self.client.json("POST", "/api/setup/restore", {
+                "photos": self.photos,
+                "backup": self.backup,
+                "archive": "immich-2026-10-27_020011",
+                "email": "alerts@example.com",
+                "confirm": "restore",
+            })
+        self.assertEqual(status, 400)
+        self.assertIn("backup finishes", body["error"])
+        self.started.assert_not_called()
         status, body = self.client.json("POST", "/api/setup/restore", {
             "photos": self.photos,
             "backup": self.backup,
@@ -334,6 +363,17 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(saved.restore_archive, "immich-2026-10-27_020011")
         self.assertEqual(saved.email, "alerts@example.com")
         self.assertTrue(os.path.join(self.backup, ".backup-disk").startswith(self.root))
+        with patch("immich_backup.web.status.active_job", return_value="restore"):
+            for path in ("/api/actions/backup", "/api/actions/check"):
+                self.started.reset_mock()
+                status, body = self.client.json("POST", path, {})
+                self.assertEqual(status, 400)
+                self.assertIn("restore finishes", body["error"])
+                self.started.assert_not_called()
+            status, body = self.client.json("POST", "/api/settings/drives", {"photos": self.photos, "backup": self.backup})
+            self.assertEqual(status, 400)
+            status, settings = self.client.json("GET", "/api/settings")
+            self.assertEqual(settings["job"], "restore")
 
     def test_sleep_settings_are_only_for_a_hard_drive(self):
         self.client.json("POST", "/api/setup/account", {"email": "owner@example.com", "password": "correct-horse"})

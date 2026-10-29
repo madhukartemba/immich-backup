@@ -29,6 +29,7 @@ SHELL = """<!DOCTYPE html>
   button, a.btn { margin-top: 18px; border:0; border-radius: 999px; padding: 12px 16px; background: var(--lime);
     color:#14200c; font: inherit; font-weight: 650; cursor: pointer; text-decoration:none; display:inline-block; }
   button.quiet { margin-left: 8px; background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button:disabled, select:disabled, input:disabled { opacity: .38; cursor: not-allowed; }
   .error { color: var(--red); min-height: 1.2em; }
   .error.ok { color: #7ddea0; }
   .steps { display:flex; gap:8px; margin-top: 18px; }
@@ -121,14 +122,14 @@ SETUP = page(
       <button type="button" class="quiet back" data-back="choice">Back</button>
     </form>
     <form id="restore" class="hidden">
-      <p>Both drives must already be mounted. Nothing is formatted, and the backup drive is only read. This installs Docker and Immich, copies the photo library onto the photo drive, and replaces the Immich database with the archive you choose.</p>
+      <p>Both drives must already be mounted. Nothing is formatted, and the backup drive is only read. This installs Docker and Immich, copies the photo library onto the photo drive, replaces the Immich database with the archive you choose, and starts Immich.</p>
       <label>Backup drive<select name="backup" required></select></label>
       <label>Photo drive<select name="photos" required></select></label>
       <label>Archive<select name="archive" required></select></label>
       <label>Alert email<input name="email" type="email" required></label>
       <label>Type restore to confirm<input name="confirm" autocomplete="off" required></label>
       <p class="error"></p>
-      <button type="submit">Restore</button>
+      <button type="submit" id="restore-go">Restore</button>
       <button type="button" class="quiet back" data-back="choice">Back</button>
     </form>
     <form id="alerts" class="hidden">
@@ -165,19 +166,61 @@ SETUP = page(
         if (select.options.length > 1) select.selectedIndex = 1;
       });
     }
+    let restoreRows = [];
+    function restoreLocked(text) {
+      const form = document.getElementById("restore");
+      form.querySelectorAll("select, input, #restore-go").forEach((node) => { node.disabled = !!text; });
+      form.querySelector(".error").classList.remove("ok");
+      form.querySelector(".error").textContent = text || "";
+    }
+    function fillRestorePhotos() {
+      const backup = document.querySelector("#restore [name=backup]").value;
+      const photos = document.querySelector("#restore [name=photos]");
+      const keep = photos.value;
+      const rows = restoreRows.filter(row => row.mount !== "/" && row.mount !== backup);
+      fill(photos, rows);
+      const empty = rows.find(row => !row.has_repo);
+      if (rows.some(row => row.mount === keep)) photos.value = keep;
+      else if (empty) photos.value = empty.mount;
+    }
     async function loadArchives() {
       const mount = document.querySelector("#restore [name=backup]").value;
       const box = document.querySelector("#restore [name=archive]");
       box.innerHTML = "";
+      if (!mount) return;
       const response = await fetch("/api/restore/archives?mount=" + encodeURIComponent(mount));
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Could not read the archives");
       data.forEach((row) => {
         const option = document.createElement("option");
         option.value = row.name;
-        option.textContent = row.name;
+        const when = new Date(row.time);
+        option.textContent = Number.isNaN(when.getTime())
+          ? row.name
+          : when.toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + "  " + row.name;
         box.appendChild(option);
       });
+    }
+    async function openRestore() {
+      go("restore");
+      restoreLocked("Reading the drives.");
+      const current = await fetch("/api/status", { cache: "no-store" }).then(r => r.ok ? r.json() : {}).catch(() => ({}));
+      if (current.job) {
+        restoreLocked("A " + current.job + " is running. Wait until it finishes, then come back.");
+        return;
+      }
+      restoreRows = await fetch("/api/disks?repo=1").then(response => response.json());
+      const backups = restoreRows.filter(row => row.has_repo);
+      const backupSelect = document.querySelector("#restore [name=backup]");
+      fill(backupSelect, backups);
+      if (!backups.length) {
+        fillRestorePhotos();
+        restoreLocked("No mounted drive holds an Immich backup. Mount the backup drive (it has an immich-borg folder) and reload this page.");
+        return;
+      }
+      restoreLocked("");
+      fillRestorePhotos();
+      await loadArchives();
     }
     document.querySelectorAll("[data-back]").forEach((button) => {
       button.onclick = () => {
@@ -205,14 +248,10 @@ SETUP = page(
       } catch (error) { showError(error); }
     };
     document.getElementById("choose-restore").onclick = async () => {
-      try {
-        fillAll(await fetch("/api/disks").then(response => response.json()));
-        go("restore");
-        await loadArchives();
-      } catch (error) { showError(error); }
+      try { await openRestore(); } catch (error) { showError(error); }
     };
     document.querySelector("#restore [name=backup]").onchange = async () => {
-      try { await loadArchives(); } catch (error) { showError(error); }
+      try { fillRestorePhotos(); await loadArchives(); } catch (error) { showError(error); }
     };
     document.getElementById("drives").onsubmit = async (event) => {
       event.preventDefault();
@@ -225,6 +264,12 @@ SETUP = page(
     document.getElementById("restore").onsubmit = async (event) => {
       event.preventDefault();
       const form = new FormData(event.target);
+      if (form.get("photos") === form.get("backup")) {
+        showError(new Error("The photo drive and backup drive must be different"));
+        return;
+      }
+      if (!confirm("Restore " + form.get("archive") + " onto " + form.get("photos") + "? Immich on this machine is replaced.")) return;
+      document.getElementById("restore-go").disabled = true;
       try {
         const data = await post("/api/setup/restore", {
           photos: form.get("photos"),
@@ -235,10 +280,14 @@ SETUP = page(
         });
         if ((data.message || "").indexOf("already running") !== -1) {
           showError(new Error(data.message));
+          document.getElementById("restore-go").disabled = false;
           return;
         }
         location.href = "/";
-      } catch (error) { showError(error); }
+      } catch (error) {
+        showError(error);
+        document.getElementById("restore-go").disabled = false;
+      }
     };
     document.getElementById("alerts").onsubmit = async (event) => {
       event.preventDefault();
@@ -329,6 +378,10 @@ SETTINGS = page(
       fillDrive(document.querySelector("#drives [name=photos]"), rows, data.photos);
       fillDrive(document.querySelector("#drives [name=backup]"), rows, data.backup);
       showSleep(data);
+      if (data.job === "restore" || data.job === "backup") {
+        document.querySelectorAll("#drives select, #drives button").forEach((node) => { node.disabled = true; });
+        mark("drive-error", "Drives cannot change while a " + data.job + " is running.", false);
+      }
     });
     function mark(id, text, ok) {
       const node = document.getElementById(id);
@@ -427,6 +480,18 @@ def require_user(handler):
         send_json(handler, 401, {"error": "Sign in required"})
         return False
     return True
+
+
+def has_repo(mount):
+    if mount in {"", "/"}:
+        return False
+    return os.path.isfile(os.path.join(mount, "immich-borg", "config"))
+
+
+def refuse_while(jobs, message):
+    job = status.active_job()
+    if job in jobs:
+        raise ValueError(message.replace("JOB", job))
 
 
 def choose_drive(mount):
@@ -565,7 +630,12 @@ def dispatch(handler, method):
         if method == "GET" and path == "/api/disks":
             if not require_user(handler):
                 return True
-            send_json(handler, 200, disks.list_disks())
+            rows = disks.list_disks()
+            if (query.get("repo") or [""])[0] == "1":
+                # Only the restore screen asks. Reading every drive could wake a sleeping one.
+                for row in rows:
+                    row["has_repo"] = has_repo(row.get("mount") or "")
+            send_json(handler, 200, rows)
             return True
         if method == "GET" and path == "/api/restore/archives":
             if not require_user(handler):
@@ -575,7 +645,10 @@ def dispatch(handler, method):
             if not disk:
                 raise ValueError("Choose the backup drive")
             repo = disk["mount"].rstrip("/") + "/immich-borg"
-            send_json(handler, 200, restore.list_archives(repo))
+            rows = restore.list_archives(repo)
+            for row in rows:
+                row["time"] = status.local_iso(row["time"][:19])
+            send_json(handler, 200, rows)
             return True
         if method == "GET" and path == "/api/settings":
             if not require_user(handler):
@@ -591,6 +664,7 @@ def dispatch(handler, method):
                 "hdd": status.C.backup_rotational,
                 "spindown_enabled": status.C.spindown_enabled,
                 "spindown_idle_minutes": max(1, status.C.spindown_idle_seconds // 60),
+                "job": status.active_job(),
             })
             return True
         if method == "POST" and path == "/api/setup/account":
@@ -627,6 +701,7 @@ def dispatch(handler, method):
             if not require_user(handler):
                 return True
             data = read_json(handler)
+            refuse_while({"restore", "backup", "check"}, "Wait until the JOB finishes before starting a restore")
             if str(data.get("confirm") or "") != "restore":
                 raise ValueError('Type "restore" to confirm')
             archive = str(data.get("archive") or "")
@@ -635,7 +710,10 @@ def dispatch(handler, method):
             email = str(data.get("email") or "").strip()
             if not auth.email_ok(email):
                 raise ValueError("Enter an alert email")
-            save_drives(str(data.get("photos") or ""), str(data.get("backup") or ""))
+            backup_mount = str(data.get("backup") or "")
+            if not has_repo(backup_mount):
+                raise ValueError("That drive has no Immich backup. Choose the drive that holds immich-borg.")
+            save_drives(str(data.get("photos") or ""), backup_mount)
             update(status.C.config_path, {
                 "notify": {"email": email},
                 "restore": {"archive": archive},
@@ -666,6 +744,7 @@ def dispatch(handler, method):
                 return True
             if status.borg_running():
                 raise ValueError("Wait until the backup finishes before changing drives")
+            refuse_while({"restore", "backup"}, "Wait until the JOB finishes before changing drives")
             data = read_json(handler)
             save_drives(str(data.get("photos") or ""), str(data.get("backup") or ""))
             send_json(handler, 200, {"ok": True, "message": "Saved"})
@@ -688,6 +767,7 @@ def dispatch(handler, method):
                 return True
             read_json(handler)
             command = "backup" if path.endswith("backup") else "check"
+            refuse_while({"restore"}, "Wait until the restore finishes")
             message = actions.start(status.C, command)
             status.invalidate_cache()
             send_json(handler, 200, {"ok": True, "message": message})

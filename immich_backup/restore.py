@@ -11,7 +11,9 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
+import urllib.request
 
 from immich_backup.backup import borg_env, check_backup_disk, check_media, fail, log
 
@@ -52,17 +54,27 @@ class ProcessRunner:
         return subprocess.run(args, env=env, input=input, capture_output=True)
 
     def run_input(self, args, chunks, env=None):
-        proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-        try:
-            for chunk in chunks:
-                proc.stdin.write(chunk)
-            proc.stdin.close()
-        except Exception:
-            proc.kill()
-            proc.wait()
-            raise
-        out, err = proc.communicate()
-        return subprocess.CompletedProcess(args, proc.returncode, out, err)
+        # Output goes to files: psql prints a line per statement and a full pipe would stall it.
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=out, stderr=err, env=env)
+            try:
+                for chunk in chunks:
+                    proc.stdin.write(chunk)
+            except BrokenPipeError:
+                pass
+            except BaseException:
+                proc.kill()
+                proc.wait()
+                raise
+            finally:
+                try:
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass
+            code = proc.wait()
+            out.seek(0)
+            err.seek(0)
+            return subprocess.CompletedProcess(args, code, out.read()[-20000:], err.read()[-20000:])
 
 
 def assert_safe(cfg):
@@ -234,7 +246,7 @@ def compose_command(cfg, *args):
 
 
 def wait_database(cfg, runner):
-    for _ in range(30):
+    for _ in range(90):
         proc = runner.run([
             "docker", "exec", cfg.postgres_container,
             "pg_isready", "-U", cfg.database_user, "-d", cfg.database,
@@ -243,6 +255,33 @@ def wait_database(cfg, runner):
             return
         time.sleep(2)
     fail(cfg, "database did not become ready")
+
+
+def immich_answers(cfg):
+    try:
+        with urllib.request.urlopen(cfg.immich_ping, timeout=3) as resp:
+            return resp.status == 200 and b"pong" in resp.read(64).lower()
+    except Exception:
+        return False
+
+
+def wait_immich(cfg, seconds=900):
+    deadline = time.monotonic() + seconds
+    while True:
+        if immich_answers(cfg):
+            return
+        if time.monotonic() >= deadline:
+            fail(cfg, "Immich started but did not answer within " + str(seconds // 60) + " minutes")
+        time.sleep(5)
+
+
+def last_error(raw):
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if "ERROR" in line or "FATAL" in line:
+            return line[:200]
+    return lines[-1][:200] if lines else ""
 
 
 def load_database(cfg, runner):
@@ -260,7 +299,7 @@ def load_database(cfg, runner):
 
 def list_archives(repo, runner=None):
     if not os.path.isfile(os.path.join(repo, "config")):
-        raise ValueError("That drive has no Borg repository")
+        raise ValueError("That drive has no Immich backup. Choose the drive that holds immich-borg.")
     runner = runner or ProcessRunner()
     env = os.environ.copy()
     env["BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK"] = "yes"
@@ -281,6 +320,14 @@ def list_archives(repo, runner=None):
     if not rows:
         raise ValueError("That repository has no Immich archives")
     return rows
+
+
+def refresh_archives(cfg):
+    try:
+        from immich_backup.archives import refresh
+        refresh(cfg)
+    except Exception:
+        pass
 
 
 def confirm_mounted(cfg):
@@ -305,62 +352,79 @@ def run(cfg, runner=None, os_release_path="/etc/os-release", prefix="/"):
         from immich_backup.backup import notify
         notify(cfg, "FAILED Immich restore is already running")
         return 1
-    mount_dir = os.path.join(cfg.backup_mount, "restore-mount")
+    mount_dir = os.path.join(cfg.state_dir, "restore-mount")
     mounted = False
     try:
         log(cfg, "starting restore of " + archive)
-        confirm_mounted(cfg)
-        missing = missing_tools(runner)
-        if missing:
-            try:
-                with open(os_release_path, encoding="utf-8") as fh:
-                    text = fh.read()
-                arch = None
-                if "docker" in missing:
-                    probed = runner.run(["dpkg", "--print-architecture"])
-                    raw = probed.stdout or b""
-                    arch = raw.decode("utf-8").strip() if isinstance(raw, bytes) else raw.strip()
-                    if probed.returncode != 0 or not arch:
-                        fail(cfg, "could not detect the system architecture")
-                install_runtime(cfg, runner, text, arch, prefix)
-            except ValueError as exc:
-                fail(cfg, str(exc))
-        else:
-            log(cfg, "Docker, Borg, and rsync are already installed")
-        existed = os.path.isfile(cfg.compose)
-        os.makedirs(mount_dir, exist_ok=True)
-        mounted_proc = runner.run(["borg", "mount", "::" + archive, mount_dir], env=borg_env(cfg))
-        if mounted_proc.returncode != 0:
-            fail(cfg, "could not open the archive")
-        mounted = True
-        layout = find_layout(mount_dir)
-        missing_files = layout.missing()
-        if missing_files:
-            fail(cfg, "archive is missing " + ", ".join(missing_files))
-        place_files(cfg, layout)
-        log(cfg, "restored Immich configuration")
-        copied = runner.run(["rsync", "-aH", "--numeric-ids", layout.media + "/", cfg.media_mount + "/"])
-        if copied.returncode != 0:
-            fail(cfg, "could not copy the photo library")
-        log(cfg, "restored photo library")
-        if existed:
-            runner.run(compose_command(cfg, "stop"))
-        for args in (
-            compose_command(cfg, "pull"),
-            compose_command(cfg, "create"),
-            compose_command(cfg, "start", "database"),
-        ):
-            if runner.run(args).returncode != 0:
-                fail(cfg, "docker compose failed")
-        wait_database(cfg, runner)
-        loaded = load_database(cfg, runner)
-        if loaded.returncode != 0:
-            fail(cfg, "database restore failed")
-        log(cfg, "database restore exit 0")
-        if runner.run(compose_command(cfg, "up", "-d")).returncode != 0:
-            fail(cfg, "Immich did not start")
-        log(cfg, "restore finished")
-        return 0
+        try:
+            confirm_mounted(cfg)
+            missing = missing_tools(runner)
+            if missing:
+                log(cfg, "restore step installing " + ", ".join(missing))
+                try:
+                    with open(os_release_path, encoding="utf-8") as fh:
+                        text = fh.read()
+                    arch = None
+                    if "docker" in missing:
+                        probed = runner.run(["dpkg", "--print-architecture"])
+                        raw = probed.stdout or b""
+                        arch = raw.decode("utf-8").strip() if isinstance(raw, bytes) else raw.strip()
+                        if probed.returncode != 0 or not arch:
+                            fail(cfg, "could not detect the system architecture")
+                    install_runtime(cfg, runner, text, arch, prefix)
+                except ValueError as exc:
+                    fail(cfg, str(exc))
+                log(cfg, "installed Docker, Borg, and rsync")
+            else:
+                log(cfg, "Docker, Borg, and rsync are already installed")
+            existed = os.path.isfile(cfg.compose)
+            log(cfg, "restore step opening the archive")
+            os.makedirs(mount_dir, exist_ok=True)
+            mounted_proc = runner.run(["borg", "mount", "::" + archive, mount_dir], env=borg_env(cfg))
+            if mounted_proc.returncode != 0:
+                fail(cfg, "could not open the archive")
+            mounted = True
+            layout = find_layout(mount_dir)
+            missing_files = layout.missing()
+            if missing_files:
+                fail(cfg, "archive is missing " + ", ".join(missing_files))
+            if existed:
+                runner.run(compose_command(cfg, "stop"))
+            place_files(cfg, layout)
+            log(cfg, "restored Immich configuration")
+            copied = runner.run(["rsync", "-aH", "--numeric-ids", layout.media + "/", cfg.media_mount + "/"])
+            if copied.returncode != 0:
+                fail(cfg, "could not copy the photo library")
+            log(cfg, "restored photo library")
+            runner.run(["borg", "umount", mount_dir])
+            mounted = False
+            log(cfg, "restore step downloading Immich")
+            if runner.run(compose_command(cfg, "pull")).returncode != 0:
+                fail(cfg, "could not download Immich")
+            if runner.run(compose_command(cfg, "create")).returncode != 0:
+                fail(cfg, "could not create the Immich containers")
+            log(cfg, "restore step starting the database")
+            if runner.run(compose_command(cfg, "start", "database")).returncode != 0:
+                fail(cfg, "the Immich database did not start")
+            wait_database(cfg, runner)
+            log(cfg, "restore step loading the database")
+            loaded = load_database(cfg, runner)
+            if loaded.returncode != 0:
+                reason = last_error(loaded.stderr)
+                fail(cfg, "database restore failed" + (": " + reason if reason else ""))
+            log(cfg, "database restore exit 0")
+            log(cfg, "restore step starting Immich")
+            if runner.run(compose_command(cfg, "up", "-d")).returncode != 0:
+                fail(cfg, "Immich did not start")
+            log(cfg, "restore step waiting for Immich")
+            wait_immich(cfg)
+            log(cfg, "restore finished, Immich is running")
+            refresh_archives(cfg)
+            return 0
+        except SystemExit:
+            raise
+        except Exception as exc:
+            fail(cfg, "restore stopped unexpectedly: " + (type(exc).__name__ + " " + str(exc)).strip()[:200])
     finally:
         if mounted:
             runner.run(["borg", "umount", mount_dir])

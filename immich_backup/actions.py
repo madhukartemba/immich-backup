@@ -2,6 +2,7 @@
 
 import fcntl
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -29,6 +30,19 @@ def mark_pending(cfg, command):
     os.replace(tmp, path)
 
 
+def launcher(command):
+    """Run the job in its own systemd unit, so restarting the status page cannot stop it."""
+    if os.geteuid() != 0 or not shutil.which("systemd-run") or not os.path.isdir("/run/systemd/system"):
+        return []
+    unit = "immich-backup-" + command + "-" + str(int(time.time()))
+    app = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return [
+        "systemd-run", "--quiet", "--collect", "--unit", unit,
+        "--description", "Immich backup " + command,
+        "--working-directory", app, "--setenv", "PYTHONPATH=" + app,
+    ]
+
+
 def start(cfg, command):
     if command in {"backup", "restore"} and busy(cfg):
         if command == "restore":
@@ -36,7 +50,7 @@ def start(cfg, command):
         return "A backup is already running"
     mark_pending(cfg, command)
     subprocess.Popen(
-        [sys.executable, "-m", "immich_backup", command, "--config", cfg.config_path],
+        launcher(command) + [sys.executable, "-m", "immich_backup", command, "--config", cfg.config_path],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,

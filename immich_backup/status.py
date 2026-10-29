@@ -130,6 +130,7 @@ PAGE = r"""<!DOCTYPE html>
     background: var(--lime); color: #14200c; text-decoration: none; cursor: pointer;
   }
   button.quiet, a.quiet { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button:disabled, .btn.off { opacity: 0.38; cursor: not-allowed; pointer-events: none; }
   @media (max-width: 980px) {
     .grid { grid-template-columns: 1fr 1fr; }
   }
@@ -151,7 +152,7 @@ PAGE = r"""<!DOCTYPE html>
     <nav class="tools">
       <button id="run" type="button">Run backup now</button>
       <button id="checkrepo" type="button">Check repository</button>
-      <a class="btn quiet" href="/settings">Settings</a>
+      <a class="btn quiet" id="settings" href="/settings">Settings</a>
       <button id="logout" class="quiet" type="button">Log out</button>
     </nav>
     <section class="hero">
@@ -271,13 +272,22 @@ function render(d) {
   const last = d.last_success || {};
   $("last").textContent = last.at ? clock(last.at, false) : "None";
   $("lastsub").textContent = last.took ? "Finished in " + last.took : "No finished copy yet";
-  if (d.state === "running" && d.bytes_per_sec) {
+  const job = d.job || "";
+  $("run").disabled = !!job;
+  $("checkrepo").disabled = !!job;
+  $("run").title = job ? "Wait until the " + job + " finishes" : "";
+  $("checkrepo").title = $("run").title;
+  $("settings").classList.toggle("off", job === "restore");
+  $("settings").setAttribute("aria-disabled", job === "restore" ? "true" : "false");
+  if (job === "restore") {
+    $("barnote").textContent = "Backups, checks, and settings are paused until the restore finishes.";
+  } else if (d.state === "running" && d.bytes_per_sec) {
     const mb = d.bytes_per_sec / 1024 / 1024;
     let note = (mb >= 10 ? mb.toFixed(0) : mb.toFixed(1)) + " MB/s";
     if (d.eta_seconds) note += ", about " + duration(d.eta_seconds) + " left, around " + finishClock(d.eta_seconds);
     $("barnote").textContent = note;
   } else {
-    $("barnote").textContent = d.state === "running" ? "Measuring write speed" : "";
+    $("barnote").textContent = job === "backup" && d.headline === "Copying" ? "Measuring write speed" : "";
   }
   const rows = d.archives || [];
   $("archives").className = rows.length ? "" : "empty";
@@ -299,8 +309,10 @@ function render(d) {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
 }
-async function act(url, confirmText) {
+async function act(url, confirmText, button) {
+  if (button && button.disabled) return;
   if (confirmText && !confirm(confirmText)) return;
+  if (button) { $("run").disabled = true; $("checkrepo").disabled = true; }
   const response = await fetch(url, { method: "POST", headers: { "X-Immich-Backup": "1" } });
   if (response.status === 401) { location.href = "/login"; return; }
   const data = await response.json().catch(() => ({}));
@@ -319,8 +331,8 @@ async function act(url, confirmText) {
   $("barnote").textContent = data.message || data.error || "";
   arm(300);
 }
-$("run").onclick = () => act("/api/actions/backup", "Start a backup now? The backup disk will spin up.");
-$("checkrepo").onclick = () => act("/api/actions/check", "Check the repository now? The backup disk will spin up.");
+$("run").onclick = () => act("/api/actions/backup", "Start a backup now? The backup disk will spin up.", $("run"));
+$("checkrepo").onclick = () => act("/api/actions/check", "Check the repository now? The backup disk will spin up.", $("checkrepo"));
 $("logout").onclick = () => act("/api/logout");
 async function tick() {
   try {
@@ -543,7 +555,8 @@ def launch_state(command, started, now, lines, process_text):
 def pending_command(lines, process_text):
     path = os.path.join(C.state_dir, "pending-job")
     try:
-        command, started = open(path, encoding="utf-8").read().split()
+        with open(path, encoding="utf-8") as fh:
+            command, started = fh.read().split()
         started = float(started)
     except (OSError, ValueError):
         return ""
@@ -725,14 +738,75 @@ def failure_text(lines):
 
 
 def restore_in_progress(lines):
+    """The log shows a restore that started and has not finished or failed."""
     active = False
     for line in lines:
         padded = " " + line
         if " starting restore " in padded:
             active = True
-        if " restore finished" in padded or " FAILED " in padded:
+        if (
+            " restore finished" in padded
+            or " FAILED " in padded
+            or "starting local borg create" in line
+            or "starting repository check" in line
+        ):
             active = False
     return active
+
+
+def human_gb(n):
+    value = n / 1024 ** 3
+    return (("%.0f" if value >= 10 else "%.1f") % value) + " GB"
+
+
+RESTORE_STEPS = (
+    ("starting restore of", 2, "Checking the drives."),
+    ("restore step installing", 4, "Installing Docker, Borg, and rsync."),
+    ("installed Docker, Borg, and rsync", 8, "Opening the archive."),
+    ("Docker, Borg, and rsync are already installed", 8, "Opening the archive."),
+    ("restore step opening the archive", 8, "Opening the archive."),
+    ("restored Immich configuration", 12, "Copying the photo library back."),
+    ("restored photo library", 60, "Downloading Immich."),
+    ("restore step downloading Immich", 60, "Downloading Immich."),
+    ("restore step starting the database", 75, "Starting the database."),
+    ("restore step loading the database", 80, "Loading the database."),
+    ("database restore exit 0", 90, "Starting Immich."),
+    ("restore step starting Immich", 90, "Starting Immich."),
+    ("restore step waiting for Immich", 95, "Waiting for Immich to answer. The first start can take a few minutes."),
+)
+
+
+def restore_step(lines):
+    """Progress and wording for the newest restore in the log."""
+    start = 0
+    for index, line in enumerate(lines):
+        if "starting restore of" in line:
+            start = index
+    progress, detail, archive = 0, "Starting the restore.", ""
+    for line in lines[start:]:
+        if "starting restore of" in line:
+            archive = line.split("starting restore of", 1)[1].strip()
+        for marker, pct, text in RESTORE_STEPS:
+            if marker in line:
+                progress, detail = pct, text
+    return progress, detail, archive
+
+
+def active_job(process_text=None, lines=None):
+    """The job that is running now: restore, backup, check, or nothing."""
+    if process_text is None:
+        _, process_text, _ = run(["ps", "-eo", "args="])
+    if lines is None:
+        lines = read_log_all()
+    pending = pending_command(lines, process_text)
+    for command in ("restore", "backup", "check"):
+        if listed_command(process_text, command) or pending == command:
+            return command
+    if "borg create" in process_text:
+        return "backup"
+    if "borg check" in process_text:
+        return "check"
+    return ""
 
 
 def status():
@@ -754,12 +828,22 @@ def status():
     kind, reason = failure_text(shown)
     backup_alive = bool(proc) or active == "activating" or listed_command(process_text, "backup") or pending == "backup"
 
-    if restore_in_progress(full_log) or listed_command(process_text, "restore") or pending == "restore":
+    restore_alive = listed_command(process_text, "restore") or pending == "restore"
+    restore_progress = None
+    if restore_alive:
         state = "running"
         headline = "Restoring"
-        detail = "Installing Immich and copying the library back."
-        if proc and proc.get("elapsed"):
-            detail = "Running for " + proc["elapsed"]
+        restore_progress, detail, archive = restore_step(full_log)
+        if restore_progress == 12 and media.get("used"):
+            detail = "Copying the photo library back. " + human_gb(media["used"]) + " on the photo drive so far."
+        if archive:
+            detail = detail + " Archive " + archive + "."
+    elif restore_in_progress(full_log):
+        state = "failed"
+        headline = "Restore stopped"
+        _, step, _ = restore_step(full_log)
+        detail = "The restore stopped before it finished. It was at: " + step.rstrip(".").lower() + "."
+        kind, reason = "restore", detail
     elif backup_alive:
         state = "running"
         headline = "Copying" if proc else "Starting"
@@ -791,7 +875,7 @@ def status():
                     detail = line.split("borg warning ", 1)[1].strip()[:240]
             state, headline = "ok", "Finished with a warning"
         elif job == "restore" and result == "ok":
-            state, headline, detail = "ok", "Restored", "Immich was restored from the backup."
+            state, headline, detail = "ok", "Restored", "Immich was restored from the backup and is running."
         elif result == "failed":
             state = "failed"
             headline = "Restore failed" if job == "restore" else "Backup failed"
@@ -803,7 +887,9 @@ def status():
     progress = None
     rate = None
     eta = None
-    if state == "running" and backup.get("used") and media.get("used"):
+    if restore_alive:
+        progress = restore_progress
+    elif state == "running" and backup.get("used") and media.get("used"):
         progress = min(99.0, backup["used"] / media["used"] * 100.0)
         rate = write_rate(backup["used"])
         remaining = media["used"] - backup["used"]
@@ -813,7 +899,10 @@ def status():
         progress = 100.0
 
     archives_note = "The first archive appears when this copy finishes."
-    if state == "running":
+    if restore_alive:
+        archives = load_archives()
+        archives_note = "The archive list is read when the restore finishes."
+    elif state == "running":
         archives = load_archives()
         if archives:
             archives_note = "Showing the previous list. A new archive is still being written."
@@ -829,8 +918,18 @@ def status():
         check = {"state": "running", "at": check.get("at") or ""}
     space = space_level(backup)
 
+    if restore_alive:
+        job = "restore"
+    elif backup_alive:
+        job = "backup"
+    elif headline == "Checking":
+        job = "check"
+    else:
+        job = ""
+
     return {
         "state": state,
+        "job": job,
         "headline": headline,
         "detail": detail,
         "progress": progress,
