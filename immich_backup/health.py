@@ -78,6 +78,15 @@ def unsupported(data):
     return "unavailable" in text or "not supported" in text
 
 
+def device_from_source(source, type_name, parent_name):
+    """The disk to ask for SMART. A filesystem on the disk itself has no parent partition."""
+    if parent_name:
+        return "/dev/" + parent_name
+    if type_name == "disk" and source:
+        return source if source.startswith("/") else "/dev/" + source
+    return ""
+
+
 def device_for_mount(mount):
     if not mount:
         return ""
@@ -89,15 +98,16 @@ def device_for_mount(mount):
     source = (found.stdout or "").split()
     if found.returncode != 0 or not source:
         return ""
-    parent = subprocess.run(
-        ["lsblk", "-no", "PKNAME", source[0]],
+    info = subprocess.run(
+        ["lsblk", "-ndo", "TYPE,PKNAME", source[0]],
         text=True,
         capture_output=True,
     )
-    name = (parent.stdout or "").split()
-    if parent.returncode != 0 or not name:
+    fields = (info.stdout or "").split()
+    if info.returncode != 0 or not fields:
         return ""
-    return "/dev/" + name[0]
+    parent = fields[1] if len(fields) > 1 else ""
+    return device_from_source(source[0], fields[0], parent)
 
 
 def during_backup(cfg, smartctl_fn=None, device_fn=None):
@@ -121,10 +131,12 @@ def during_backup(cfg, smartctl_fn=None, device_fn=None):
         if data is None:
             continue
         if unsupported(data):
-            remember_note(cfg, key, True, "Not available")
+            remember_note(cfg, key, True, "SMART is not available for this disk")
             continue
         remember(cfg, key, data, name)
         found.extend(item for item in problems(name, data) if "could not be read" not in item)
+    if cfg.media_mount and not any(item[0] == "primary" for item in checks):
+        remember_note(cfg, "primary", True, "SMART is not available for this disk")
     return found
 
 

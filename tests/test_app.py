@@ -1,11 +1,12 @@
 from types import SimpleNamespace
+import json
 import os
 import tempfile
 import unittest
 
 from immich_backup.backup import borg_warning, space_note
 from immich_backup.config import load
-from immich_backup.health import during_backup
+from immich_backup.health import device_from_source, during_backup
 from immich_backup.install import write_units
 from immich_backup.spindown import should_standby
 from immich_backup.status import (
@@ -157,6 +158,42 @@ class AppTests(unittest.TestCase):
                 device_fn=lambda mount: "",
             )
             self.assertIn("Backup disk: SMART health check failed", notes)
+
+    def test_a_filesystem_on_the_whole_disk_is_still_checked(self):
+        self.assertEqual(device_from_source("/dev/sdc1", "part", "sdc"), "/dev/sdc")
+        self.assertEqual(device_from_source("/dev/sdb", "disk", ""), "/dev/sdb")
+        self.assertEqual(device_from_source("", "", ""), "")
+        with tempfile.TemporaryDirectory() as tmp:
+            photo = os.path.join(tmp, "photo-disk")
+            open(photo, "w", encoding="utf-8").close()
+            cfg = SimpleNamespace(
+                backup_disk="",
+                backup_disk_name="Backup disk",
+                backup_mount="",
+                media_mount=os.path.join(tmp, "photos"),
+                primary_match="",
+                primary_name="Photo disk",
+                state_dir=tmp,
+                smart_file=os.path.join(tmp, "smart.json"),
+            )
+            during_backup(
+                cfg,
+                smartctl_fn=lambda dev, skip: {"smart_status": {"passed": True}},
+                device_fn=lambda mount: photo if mount == cfg.media_mount else "",
+            )
+            with open(cfg.smart_file, encoding="utf-8") as fh:
+                saved = json.load(fh)
+            self.assertEqual(saved["primary"]["summary"], "Healthy")
+            self.assertTrue(saved["primary"]["ok"])
+            os.remove(cfg.smart_file)
+            during_backup(
+                cfg,
+                smartctl_fn=lambda dev, skip: {"smart_support": {"available": False}},
+                device_fn=lambda mount: "",
+            )
+            with open(cfg.smart_file, encoding="utf-8") as fh:
+                saved = json.load(fh)
+            self.assertEqual(saved["primary"]["summary"], "SMART is not available for this disk")
 
     def test_hard_drive_sleeps_only_after_it_has_been_idle(self):
         cfg = SimpleNamespace(spindown_enabled=True, spindown_idle_seconds=600)
