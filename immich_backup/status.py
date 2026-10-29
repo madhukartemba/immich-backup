@@ -303,7 +303,8 @@ function render(d) {
   const checking = job === "check";
   $("run").disabled = !!job;
   $("checkrepo").disabled = !!job && !checking;
-  $("checkrepo").textContent = checking ? "Cancel check" : "Check repository";
+  $("checkrepo").textContent = checking ? "Stop" : "Check repository";
+  $("checkrepo").classList.toggle("quiet", checking);
   $("checkrepo").dataset.mode = checking ? "cancel" : "start";
   $("run").title = job ? "Wait until the " + job + " finishes" : "";
   $("checkrepo").title = checking ? "Stop this repository check" : $("run").title;

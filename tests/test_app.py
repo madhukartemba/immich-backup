@@ -273,7 +273,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(re_check("borg check --progress --log-json /repo"))
         self.assertTrue(re_check("/usr/bin/python3 -m immich_backup check --config /etc/immich-backup/config.ini"))
         self.assertEqual(latest_outcome(["2026-10-29T01:00:00+05:30 repository check cancelled"]), ("check", "cancelled"))
-        self.assertIn("Cancel check", PAGE)
+        self.assertIn('? "Stop"', PAGE)
         with tempfile.TemporaryDirectory() as tmp:
             cfg = SimpleNamespace(
                 state_dir=tmp,
