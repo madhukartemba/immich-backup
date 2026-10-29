@@ -190,9 +190,9 @@ PAGE = r"""<!DOCTYPE html>
     </section>
     <section class="grid">
       <article class="card"><div class="cardhead"><span>Backup disk</span><span id="spin" class="spin" hidden></span></div><strong id="disk">—</strong><em id="disksub">Backup disk</em><em id="diskhealth">SMART</em></article>
-      <article class="card"><span>Library</span><strong id="lib">—</strong><em id="libsub">Photos and videos</em><em id="libhealth">SMART</em></article>
-      <article class="card"><span>Next run</span><strong id="next">—</strong><em id="elapsed">Nightly at 01:00</em><em id="check">Repository check</em></article>
-      <article class="card"><span>Last success</span><strong id="last">—</strong><em id="lastsub">No finished copy yet</em></article>
+      <article class="card"><div class="cardhead"><span>Library</span></div><strong id="lib">—</strong><em id="libsub">Photos and videos</em><em id="libhealth">SMART</em></article>
+      <article class="card"><div class="cardhead"><span>Next run</span></div><strong id="next">—</strong><em id="elapsed">Nightly at 01:00</em><em id="check">Repository check</em></article>
+      <article class="card"><div class="cardhead"><span>Last success</span></div><strong id="last">—</strong><em id="lastsub">No finished copy yet</em></article>
     </section>
     <section class="split">
       <article class="panel">
