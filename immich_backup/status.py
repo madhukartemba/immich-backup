@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 C = None
@@ -209,15 +209,35 @@ function duration(sec) {
   const rem = min % 60;
   return rem ? h + " h " + rem + " min" : h + " h";
 }
+function clock(value, withDate) {
+  if (value == null || value === "") return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString([], withDate
+    ? { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+    : { weekday: "short", hour: "numeric", minute: "2-digit" });
+}
+function localTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "");
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+}
+function localLog(line) {
+  return String(line).replace(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?/,
+    (stamp) => clock(stamp, true)
+  );
+}
 function smartLine(s) {
-  if (!s || !s.checked_at) return "SMART not checked yet";
+  if (!s || (s.at == null && !s.checked_at)) return "SMART not checked yet";
   const word = s.ok ? (s.summary || "Healthy") : (s.summary || "SMART problem");
-  return word + ", checked " + s.checked_at;
+  const when = typeof s.at === "number" ? clock(s.at * 1000, false) : s.checked_at;
+  return word + ", checked " + when;
 }
 function render(d) {
   const dot = $("dot");
   dot.className = "dot" + (d.state === "running" ? " run" : d.state === "failed" ? " bad" : d.state === "ok" ? " ok" : "");
-  $("live").textContent = d.state === "running" ? "Live" : "Updated " + (d.updated || "");
+  $("live").textContent = d.state === "running" ? "Live" : "Updated " + localTime(d.updated);
   const immichUp = d.immich === "up";
   $("idot").className = "dot" + (immichUp ? " ok" : " bad");
   $("immich").textContent = immichUp ? "Immich up" : "Immich down";
@@ -240,16 +260,16 @@ function render(d) {
   const m = d.media || {};
   $("lib").textContent = gb(m.used);
   $("libsub").textContent = m.mount_ok ? gb(m.avail) + " free of " + gb(m.size) : "Photo disk is not mounted";
-  const when = d.next_run || "—";
-  const short = when.match(/^(\w+)\s+\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2})/);
-  $("next").textContent = short ? short[1] + " " + short[2] : when;
-  $("elapsed").textContent = d.elapsed ? "This copy has run " + d.elapsed : when;
+  const when = d.next_run ? clock(d.next_run, false) : "Not scheduled";
+  $("next").textContent = when;
+  $("elapsed").textContent = d.elapsed ? "This copy has run " + d.elapsed : (d.next_run ? clock(d.next_run, true) : "Not scheduled");
   const check = d.check || {};
   const checkWord = { passed: "Check passed", failed: "Check failed", skipped: "Check skipped", running: "Check running" }[check.state] || "";
-  $("check").textContent = checkWord ? (check.when ? checkWord + " " + check.when : checkWord) : "";
+  const checkWhen = check.at ? clock(check.at, false) : "";
+  $("check").textContent = checkWord ? (checkWhen ? checkWord + " " + checkWhen : checkWord) : "";
   $("check").className = check.state === "failed" ? "bad" : "";
   const last = d.last_success || {};
-  $("last").textContent = last.when || "None";
+  $("last").textContent = last.at ? clock(last.at, false) : "None";
   $("lastsub").textContent = last.took ? "Finished in " + last.took : "No finished copy yet";
   if (d.state === "running" && d.bytes_per_sec) {
     const mb = d.bytes_per_sec / 1024 / 1024;
@@ -262,9 +282,9 @@ function render(d) {
   const rows = d.archives || [];
   $("archives").className = rows.length ? "" : "empty";
   $("archives").innerHTML = rows.length
-    ? "<table>" + rows.map(a => "<tr><td>" + esc(a.name) + "</td><td class='when'>" + esc(a.time) + "</td></tr>").join("") + "</table>"
+    ? "<table>" + rows.map(a => "<tr><td>" + esc(a.name) + "</td><td class='when'>" + esc(clock(a.time, true) || a.time) + "</td></tr>").join("") + "</table>"
     : esc(d.archives_note || "Waiting for the first finished copy.");
-  $("log").textContent = (d.log && d.log.length) ? d.log.join("\n") : "No log yet.";
+  $("log").textContent = (d.log && d.log.length) ? d.log.map(localLog).join("\n") : "No log yet.";
   const recover = $("recover");
   if (d.state === "failed") {
     recover.hidden = false;
@@ -284,8 +304,20 @@ async function act(url, confirmText) {
   const response = await fetch(url, { method: "POST", headers: { "X-Immich-Backup": "1" } });
   if (response.status === 401) { location.href = "/login"; return; }
   const data = await response.json().catch(() => ({}));
-  $("barnote").textContent = data.message || data.error || "Done";
-  if (url === "/api/logout") location.href = "/login";
+  if (url === "/api/logout") { location.href = "/login"; return; }
+  if (url.endsWith("/backup")) {
+    $("state").textContent = "Starting";
+    $("detail").textContent = data.message || data.error || "Starting the backup.";
+    $("dot").className = "dot run";
+    $("live").textContent = "Live";
+  } else if (url.endsWith("/check")) {
+    $("state").textContent = "Checking";
+    $("detail").textContent = data.message || data.error || "Reading the backup archives.";
+    $("dot").className = "dot run";
+    $("live").textContent = "Live";
+  }
+  $("barnote").textContent = data.message || data.error || "";
+  arm(300);
 }
 $("run").onclick = () => act("/api/actions/backup", "Start a backup now? The backup disk will spin up.");
 $("checkrepo").onclick = () => act("/api/actions/check", "Check the repository now? The backup disk will spin up.");
@@ -293,15 +325,26 @@ $("logout").onclick = () => act("/api/logout");
 async function tick() {
   try {
     const r = await fetch("/api/status", { cache: "no-store" });
-    if (r.status === 401) { location.href = "/login"; return; }
-    render(await r.json());
+    if (r.status === 401) { location.href = "/login"; return null; }
+    const data = await r.json();
+    render(data);
+    return data;
   } catch (e) {
     $("live").textContent = "Cannot reach the status service";
     $("dot").className = "dot bad";
+    return null;
   }
 }
-tick();
-setInterval(tick, 15000);
+let soon = 0;
+function arm(ms) {
+  clearTimeout(soon);
+  soon = setTimeout(loop, ms);
+}
+async function loop() {
+  const data = await tick();
+  arm(data && data.state === "running" ? 2000 : 15000);
+}
+loop();
 </script>
 </body>
 </html>
@@ -366,10 +409,16 @@ def read_log_all():
 
 
 def parse_stamp(line):
-    match = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", line)
+    match = re.match(
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)",
+        line,
+    )
     if not match:
         return None
-    return datetime.fromisoformat(match.group(1))
+    try:
+        return datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def last_success(lines):
@@ -390,7 +439,7 @@ def last_success(lines):
     if not found:
         return None
     return {
-        "when": found["at"].strftime("%a %H:%M"),
+        "at": found["at"].isoformat(timespec="seconds"),
         "took": format_duration(found["seconds"]),
     }
 
@@ -461,22 +510,98 @@ def borg_check_running():
     return "borg check" in out
 
 
-def last_check(lines):
-    state = ""
-    when = ""
+def listed_command(text, command):
+    pattern = re.compile(r"(?:^|\s)immich_backup\s+" + re.escape(command) + r"(?:\s|$)")
+    return any(pattern.search(line) for line in text.splitlines())
+
+
+def launch_state(command, started, now, lines, process_text):
+    """The job a click just started, until its process is gone and the log has the result."""
+    if command not in {"backup", "check", "restore"}:
+        return ""
+    if listed_command(process_text, command):
+        return command
     for line in lines:
         stamp = parse_stamp(line)
-        clock = stamp.strftime("%a %H:%M") if stamp else when
+        if stamp is None or stamp.timestamp() + 1 < started:
+            continue
+        finished = (
+            "borg create exit" in line
+            or "repository check passed" in line
+            or "repository check failed" in line
+            or "repository check skipped" in line
+            or "restore finished" in line
+            or " FAILED " in (" " + line)
+        )
+        if finished:
+            return ""
+    if now - started < 20:
+        return command
+    return ""
+
+
+def pending_command(lines, process_text):
+    path = os.path.join(C.state_dir, "pending-job")
+    try:
+        command, started = open(path, encoding="utf-8").read().split()
+        started = float(started)
+    except (OSError, ValueError):
+        return ""
+    return launch_state(command, started, time.time(), lines, process_text)
+
+
+def clock_iso(text):
+    """Turn a UTC timer stamp into an ISO time the browser can show locally."""
+    match = re.fullmatch(
+        r"[A-Za-z]{3}\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+([A-Za-z0-9_+\-/]+)",
+        (text or "").strip(),
+    )
+    if not match:
+        return text or ""
+    naive = datetime.fromisoformat(match.group(1) + "T" + match.group(2))
+    zone = match.group(3)
+    if zone in {"UTC", "GMT", "Z", "Etc/UTC"}:
+        return naive.replace(tzinfo=timezone.utc).isoformat(timespec="seconds")
+    try:
+        from zoneinfo import ZoneInfo
+        return naive.replace(tzinfo=ZoneInfo(zone)).isoformat(timespec="seconds")
+    except Exception:
+        return text
+
+
+def local_iso(text):
+    """Attach this machine's offset to a clock time that was stored without one."""
+    text = (text or "").strip()
+    if not text or re.search(r"(?:Z|[+-]\d{2}:\d{2})$", text):
+        return text
+    naive = None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%a, %Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            naive = datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            continue
+    if naive is None:
+        return text
+    return naive.replace(tzinfo=datetime.now().astimezone().tzinfo).isoformat(timespec="seconds")
+
+
+def last_check(lines):
+    state = ""
+    at = ""
+    for line in lines:
+        stamp = parse_stamp(line)
+        iso = stamp.isoformat(timespec="seconds") if stamp else at
         if "repository check passed" in line:
-            state, when = "passed", clock
+            state, at = "passed", iso
         elif "repository check failed" in line:
-            state, when = "failed", clock
+            state, at = "failed", iso
         elif "repository check skipped" in line:
-            state, when = "skipped", clock
+            state, at = "skipped", iso
     _, active, _ = run(["systemctl", "is-active", C.check_service], timeout=4)
     if active.strip() in {"activating", "active"} or borg_check_running():
         state = "running"
-    return {"state": state or "unknown", "when": when}
+    return {"state": state or "unknown", "at": at}
 
 
 def space_level(backup):
@@ -499,8 +624,8 @@ def next_run():
     )
     text = out.strip()
     if code != 0 or not text or text.lower() in {"n/a", ""}:
-        return "Not scheduled"
-    return text
+        return ""
+    return clock_iso(text)
 
 
 def repo_id():
@@ -523,7 +648,15 @@ def load_archives():
             and data.get("repo") == repo_id()
             and isinstance(data.get("archives"), list)
         ):
-            return data["archives"]
+            rows = []
+            for item in data["archives"]:
+                if not isinstance(item, dict):
+                    continue
+                rows.append({
+                    "name": str(item.get("name") or ""),
+                    "time": local_iso(str(item.get("time") or "")),
+                })
+            return rows
     except (OSError, json.JSONDecodeError):
         pass
     return []
@@ -542,8 +675,10 @@ def load_smart():
         item = data.get(key)
         if not isinstance(item, dict):
             continue
+        checked = item.get("at")
         clean[key] = {
             "ok": bool(item.get("ok")),
+            "at": checked if isinstance(checked, (int, float)) else None,
             "checked_at": str(item.get("checked_at") or "")[:40],
             "summary": str(item.get("summary") or "")[:160],
         }
@@ -596,30 +731,33 @@ def status():
     full_log = read_log_all()
     log = full_log[-14:]
     last = log[-1] if log else ""
+    _, process_text, _ = run(["ps", "-eo", "args="])
+    pending = pending_command(full_log, process_text)
     _, active, _ = run(["systemctl", "is-active", C.backup_service])
     active = active.strip()
     kind, reason = failure_text(full_log)
+    backup_alive = bool(proc) or active == "activating" or listed_command(process_text, "backup") or pending == "backup"
 
-    if restore_in_progress(full_log):
+    if restore_in_progress(full_log) or listed_command(process_text, "restore") or pending == "restore":
         state = "running"
         headline = "Restoring"
         detail = "Installing Immich and copying the library back."
         if proc and proc.get("elapsed"):
             detail = "Running for " + proc["elapsed"]
-    elif proc or active == "activating":
+    elif backup_alive:
         state = "running"
-        headline = "Copying"
-        detail = "Borg is writing the library to the backup disk on this VM."
+        headline = "Copying" if proc else "Starting"
+        detail = "Starting the backup." if not proc else "Borg is writing the library to the backup disk on this VM."
         if proc and proc.get("elapsed"):
             detail = "Running for " + proc["elapsed"]
+    elif borg_check_running() or listed_command(process_text, "check") or pending == "check":
+        state = "running"
+        headline = "Checking"
+        detail = "Reading the backup archives."
     elif active == "failed" or " FAILED " in (" " + last):
         state = "failed"
         headline = "Restore failed" if kind == "restore" else "Backup failed"
         detail = reason or "The last attempt did not finish."
-    elif borg_check_running():
-        state = "running"
-        headline = "Checking"
-        detail = "Reading the backup archives."
     else:
         job, result = latest_outcome(full_log)
         if job == "check" and result == "passed":
@@ -666,6 +804,10 @@ def status():
         if not archives:
             archives_note = "No finished archives yet."
 
+    check = last_check(full_log)
+    if headline == "Checking":
+        check = {"state": "running", "at": check.get("at") or ""}
+
     return {
         "state": state,
         "headline": headline,
@@ -683,23 +825,32 @@ def status():
         "eta_seconds": eta,
         "space": space_level(backup),
         "last_success": last_success(full_log),
-        "check": last_check(full_log),
+        "check": check,
         "immich": "up" if immich_up() else "down",
         "smart": load_smart(),
         "failure": reason if state == "failed" else "",
         "failure_kind": kind if state == "failed" else "",
-        "updated": datetime.now().strftime("%H:%M:%S"),
+        "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+
+
+def invalidate_cache():
+    global _status_cache, _status_cache_at
+    with _status_lock:
+        _status_cache = None
+        _status_cache_at = 0.0
 
 
 def cached_status():
     global _status_cache, _status_cache_at
     now = time.monotonic()
-    if _status_cache is not None and now - _status_cache_at < C.status_ttl:
+    ttl = 2 if _status_cache and _status_cache.get("state") == "running" else C.status_ttl
+    if _status_cache is not None and now - _status_cache_at < ttl:
         return _status_cache
     with _status_lock:
         now = time.monotonic()
-        if _status_cache is None or now - _status_cache_at >= C.status_ttl:
+        ttl = 2 if _status_cache and _status_cache.get("state") == "running" else C.status_ttl
+        if _status_cache is None or now - _status_cache_at >= ttl:
             _status_cache = status()
             _status_cache_at = now
         return _status_cache

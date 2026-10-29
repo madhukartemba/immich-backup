@@ -8,7 +8,15 @@ from immich_backup.config import load
 from immich_backup.health import during_backup
 from immich_backup.install import write_units
 from immich_backup.spindown import should_standby
-from immich_backup.status import configure, last_success, latest_outcome
+from immich_backup.status import (
+    clock_iso,
+    configure,
+    last_success,
+    latest_outcome,
+    launch_state,
+    listed_command,
+    local_iso,
+)
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,7 +55,7 @@ class AppTests(unittest.TestCase):
                 "2026-10-27T02:00:41+05:30 borg create exit 1",
             ])
             cfg.repo = old
-        self.assertEqual(result["when"], "Tue 02:00")
+        self.assertEqual(result["at"], "2026-10-27T02:00:41+05:30")
         self.assertEqual(result["took"], "30 sec")
 
     def test_a_later_repository_touch_keeps_the_success(self):
@@ -64,7 +72,19 @@ class AppTests(unittest.TestCase):
                 "2026-10-29T08:42:04+00:00 borg create exit 0",
                 "2026-10-29T08:42:05+00:00 prune exit 0",
             ])
+        self.assertEqual(result["at"], "2026-10-29T08:42:04+00:00")
         self.assertEqual(result["took"], "6 sec")
+        self.assertEqual(clock_iso("Fri 2026-10-30 01:00:00 UTC"), "2026-10-30T01:00:00+00:00")
+        shown = local_iso("Thu, 2026-10-29 08:41:59")
+        self.assertTrue(shown.startswith("2026-10-29T08:41:59"))
+        self.assertIsNotNone(__import__("datetime").datetime.fromisoformat(shown).tzinfo)
+        self.assertTrue(listed_command("/usr/bin/python3 -m immich_backup backup --config x\n", "backup"))
+        self.assertFalse(listed_command("/usr/bin/python3 -m immich_backup serve --config x\n", "backup"))
+        self.assertEqual(launch_state("backup", 1000, 1005, [], ""), "backup")
+        self.assertEqual(
+            launch_state("backup", 1000, 1005, ["2026-10-29T08:42:04+00:00 borg create exit 0"], ""),
+            "",
+        )
         self.assertEqual(latest_outcome([
             "2026-10-29T08:42:04+00:00 borg create exit 0",
             "2026-10-29T08:42:05+00:00 prune exit 0",

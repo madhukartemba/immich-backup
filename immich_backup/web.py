@@ -665,7 +665,9 @@ def dispatch(handler, method):
                 return True
             read_json(handler)
             command = "backup" if path.endswith("backup") else "check"
-            send_json(handler, 200, {"ok": True, "message": actions.start(status.C, command)})
+            message = actions.start(status.C, command)
+            status.invalidate_cache()
+            send_json(handler, 200, {"ok": True, "message": message})
             return True
     except ValueError as exc:
         send_json(handler, 400, {"error": str(exc)})

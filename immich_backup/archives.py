@@ -10,7 +10,7 @@ def refresh(cfg):
     env["BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK"] = "yes"
     env["BORG_LOCK_WAIT"] = "1"
     proc = subprocess.run(
-        ["borg", "list", "--short", "--last", "12", "--format", "{archive} {time}{NL}", cfg.repo],
+        ["borg", "list", "--short", "--last", "12", "--format", "{archive} {time:%Y-%m-%dT%H:%M:%S}{NL}", cfg.repo],
         env=env,
         text=True,
         capture_output=True,

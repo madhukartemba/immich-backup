@@ -4,6 +4,7 @@ import fcntl
 import os
 import subprocess
 import sys
+import time
 
 
 def busy(cfg):
@@ -19,11 +20,21 @@ def busy(cfg):
     return False
 
 
+def mark_pending(cfg, command):
+    os.makedirs(cfg.state_dir, exist_ok=True)
+    path = os.path.join(cfg.state_dir, "pending-job")
+    tmp = path + "." + str(os.getpid()) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(command + " " + str(time.time()) + "\n")
+    os.replace(tmp, path)
+
+
 def start(cfg, command):
     if command in {"backup", "restore"} and busy(cfg):
         if command == "restore":
             return "A backup or restore is already running"
         return "A backup is already running"
+    mark_pending(cfg, command)
     subprocess.Popen(
         [sys.executable, "-m", "immich_backup", command, "--config", cfg.config_path],
         stdout=subprocess.DEVNULL,
