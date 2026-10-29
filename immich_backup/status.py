@@ -763,9 +763,16 @@ def last_check(lines):
     return {"state": state or "unknown", "at": at}
 
 
-def backup_spin(cfg, power_fn=None, kind_fn=None):
+def backup_spin(cfg, power_fn=None, kind_fn=None, command_fn=None):
     """Sleeping or Spinning when the power check is real. Otherwise HDD, SSD, or Virtual."""
-    from immich_backup.spindown import disk_word, drive_kind, power_reading
+    from immich_backup.spindown import command_reading, disk_word, drive_kind, power_reading
+    spin_command = getattr(cfg, "spin_command", "") or ""
+    if spin_command:
+        try:
+            state, reliable = (command_fn or command_reading)(spin_command)
+        except (OSError, ValueError):
+            return "HDD"
+        return disk_word("hdd", state, reliable)
     kind_fn = kind_fn or drive_kind
     dev = cfg.backup_disk
     if not dev:

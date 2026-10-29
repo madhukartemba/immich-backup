@@ -19,6 +19,17 @@ def diskstats(name):
     return ""
 
 
+def reading_from_text(blob, returncode):
+    """Parse hdparm -C output. A sense error means the state is not real."""
+    state = ""
+    for line in (blob or "").splitlines():
+        if "drive state" in line:
+            state = line.split(":", 1)[1].replace(" ", "")
+            break
+    reliable = bool(state) and returncode == 0 and "sg_io" not in (blob or "").lower()
+    return state, reliable
+
+
 def power_reading(dev):
     """Return the hdparm -C state and whether it can be trusted.
 
@@ -26,17 +37,20 @@ def power_reading(dev):
     with a sense error, and that standby reading is not real.
     """
     try:
-        proc = subprocess.run(["hdparm", "-C", dev], text=True, capture_output=True)
-    except FileNotFoundError:
+        proc = subprocess.run(["hdparm", "-C", dev], text=True, capture_output=True, timeout=8)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return "", False
-    blob = proc.stdout + "\n" + proc.stderr
-    state = ""
-    for line in blob.splitlines():
-        if "drive state" in line:
-            state = line.split(":", 1)[1].replace(" ", "")
-            break
-    reliable = bool(state) and proc.returncode == 0 and "sg_io" not in blob.lower()
-    return state, reliable
+    return reading_from_text(proc.stdout + "\n" + proc.stderr, proc.returncode)
+
+
+def command_reading(command):
+    """Run a configured power check, such as hdparm -C on the host that holds the disk."""
+    import shlex
+    try:
+        proc = subprocess.run(shlex.split(command), text=True, capture_output=True, timeout=8)
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        return "", False
+    return reading_from_text(proc.stdout + "\n" + proc.stderr, proc.returncode)
 
 
 def power_state(dev):

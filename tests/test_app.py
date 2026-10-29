@@ -8,7 +8,7 @@ from immich_backup.backup import borg_warning, space_note
 from immich_backup.config import load
 from immich_backup.health import device_from_source, during_backup
 from immich_backup.install import write_units
-from immich_backup.spindown import disk_word, drive_kind, should_standby, spin_label
+from immich_backup.spindown import disk_word, drive_kind, reading_from_text, should_standby, spin_label
 from immich_backup.status import PAGE, backup_spin
 from immich_backup.web import SETUP
 from immich_backup.status import (
@@ -242,6 +242,15 @@ class AppTests(unittest.TestCase):
             self.assertEqual(seen, [])
             self.assertEqual(backup_spin(cfg, power, lambda dev: "hdd"), "Sleeping")
             self.assertEqual(seen, [disk])
+            cfg.spin_command = "ssh backup-spin"
+            self.assertEqual(backup_spin(cfg, power, lambda dev: "hdd", lambda cmd: ("standby", True)), "Sleeping")
+            self.assertEqual(backup_spin(cfg, power, lambda dev: "hdd", lambda cmd: ("standby", False)), "HDD")
+            self.assertEqual(seen, [disk])
+            state, reliable = reading_from_text(" drive state is:  active/idle\n", 0)
+            self.assertEqual((state, reliable), ("active/idle", True))
+            _state, reliable = reading_from_text(" drive state is:  standby\nSG_IO: bad\n", 0)
+            self.assertFalse(reliable)
+            cfg.spin_command = ""
             cfg.backup_disk = os.path.join(tmp, "missing")
             self.assertEqual(backup_spin(cfg, power, lambda dev: "hdd"), "")
             self.assertEqual(seen, [disk])

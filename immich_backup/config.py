@@ -78,6 +78,7 @@ class Config:
     smartd_primary_json: str
     spindown_idle_seconds: int
     spindown_enabled: bool
+    spin_command: str
     backup_rotational: bool
     app_dir: str
     roles: tuple
@@ -143,6 +144,7 @@ def load(path):
         smartd_primary_json=_text(parser, "health", "smartd_primary_json"),
         spindown_idle_seconds=_int(parser, "health", "spindown_idle_seconds", 600),
         spindown_enabled=_bool(parser, "health", "spindown_enabled", True),
+        spin_command=_text(parser, "health", "spin_command"),
         backup_rotational=_bool(parser, "identity", "backup_rotational", False),
         app_dir=_text(parser, "install", "app_dir", "/opt/immich-backup"),
         roles=_list(parser, "install", "roles", ("backup", "status", "check")),
