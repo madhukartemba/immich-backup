@@ -542,6 +542,10 @@ def send_archive(handler, archive):
             raise ValueError("Wait until the " + job + " finishes")
         archives.exporting = True
         try:
+            length = archives.archive_tar_bytes(status.C, archive)
+        except (OSError, ValueError):
+            length = None
+        try:
             proc = archives.export_tar(status.C, archive)
         except FileNotFoundError:
             raise ValueError("Borg is not installed") from None
@@ -568,6 +572,8 @@ def send_archive(handler, archive):
         handler.send_response(200)
         handler.send_header("Content-Type", "application/x-tar")
         handler.send_header("Content-Disposition", 'attachment; filename="%s.tar"' % archive)
+        if length is not None:
+            handler.send_header("Content-Length", str(length))
         handler.send_header("Cache-Control", "no-store")
         handler.send_header("X-Content-Type-Options", "nosniff")
         handler.end_headers()

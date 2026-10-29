@@ -4,11 +4,13 @@ Docker, Borg, apt, and the machine's disks are never called. The temporary
 directory is removed when the test ends.
 """
 
+import io
 import itertools
 import json
 import os
 import stat
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -24,7 +26,23 @@ from immich_backup.restore import (
     os_identity,
     run,
 )
-from immich_backup.archives import export_tar
+from immich_backup.archives import export_tar, gnu_tar_size, tarinfo_for_item
+
+
+def _written_gnu_tar(items):
+    """The bytes Python's streaming GNU tar writes for the same item records Borg uses."""
+    buf = io.BytesIO()
+    tar = tarfile.open(fileobj=buf, mode="w|", format=tarfile.GNU_FORMAT)
+    for item in items:
+        info = tarinfo_for_item(item)
+        if not info:
+            continue
+        if info.isreg():
+            tar.addfile(info, io.BytesIO(b"\0" * info.size))
+        else:
+            tar.addfile(info)
+    tar.close()
+    return len(buf.getvalue())
 from immich_backup.status import (
     active_job,
     configure,
@@ -366,6 +384,29 @@ class RestoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 export_tar(cfg, "../etc/passwd")
             self.assertEqual(popen.call_count, 1)
+
+    def test_gnu_tar_size_matches_borg_export_layout(self):
+        long_name = "library/albums/" + ("vacation-" * 12) + "photo.jpg"
+        items = [
+            {"path": "library", "mode": "drwxr-xr-x", "size": 4096, "user": "immich", "group": "immich", "uid": 1000, "gid": 1000},
+            {"path": "library/photo.jpg", "mode": "-rw-r--r--", "size": 1, "user": "immich", "group": "immich", "uid": 1000, "gid": 1000},
+            {"path": "library/empty.jpg", "mode": "-rw-r--r--", "size": 0, "user": "immich", "group": "immich", "uid": 1000, "gid": 1000},
+            {"path": "library/block.jpg", "mode": "-rw-r--r--", "size": 512, "user": "immich", "group": "immich", "uid": 1000, "gid": 1000},
+            {"path": "library/pad.jpg", "mode": "-rw-r--r--", "size": 513, "user": "immich", "group": "immich", "uid": 1000, "gid": 1000},
+            {"path": long_name, "mode": "-rw-r--r--", "size": 3, "user": "immich", "group": "immich", "uid": 1000, "gid": 1000},
+            {"path": "library/link.jpg", "mode": "lrwxrwxrwx", "type": "l", "source": "photo.jpg", "size": 9, "user": "immich", "group": "immich", "uid": 1000, "gid": 1000},
+            {"path": "library/hard.jpg", "mode": "hrw-r--r--", "type": "-", "source": "library/photo.jpg", "size": 99999, "user": "immich", "group": "immich", "uid": 1000, "gid": 1000},
+            {"path": "library/wide-link.jpg", "mode": "lrwxrwxrwx", "type": "l", "source": "photos/" + ("x" * 120), "size": 0, "user": "immich", "group": "immich", "uid": 1000, "gid": 1000},
+        ]
+        info = tarinfo_for_item(items[1])
+        short = len(info.tobuf(tarfile.GNU_FORMAT, tarfile.ENCODING, "surrogateescape"))
+        info.mtime = 1_763_000_000
+        self.assertEqual(len(info.tobuf(tarfile.GNU_FORMAT, tarfile.ENCODING, "surrogateescape")), short)
+        info.size = 5_000_000_000
+        self.assertEqual(len(info.tobuf(tarfile.GNU_FORMAT, tarfile.ENCODING, "surrogateescape")), short)
+        self.assertEqual(gnu_tar_size(items), _written_gnu_tar(items))
+        self.assertEqual(gnu_tar_size([]), _written_gnu_tar([]))
+        self.assertIsNone(gnu_tar_size([{"path": "library/photo.jpg", "mode": "-rw-r--r--"}]))
 
     def test_failure_reason_names_the_job(self):
         restore_lines = [

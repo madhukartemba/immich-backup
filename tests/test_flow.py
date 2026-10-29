@@ -420,14 +420,23 @@ class FlowTests(unittest.TestCase):
         self.assertIn("backup finishes", body["error"])
         self.assertEqual(started, [])
         with patch("immich_backup.web.archives.export_tar", side_effect=fake_export), \
+                patch("immich_backup.web.archives.archive_tar_bytes", return_value=len(b"ustar-bytes")), \
                 patch("immich_backup.web.status.active_job", return_value=""):
             status, body = self.client.request("GET", "/api/archives/" + name + "/download")
         self.assertEqual(status, 200)
         self.assertEqual(body, b"ustar-bytes")
+        self.assertEqual(self.client.headers.get("content-length"), str(len(b"ustar-bytes")))
         self.assertIn(name + ".tar", self.client.headers.get("content-disposition", ""))
         self.assertEqual(started, [name])
         self.assertFalse(archives.exporting)
+        with patch("immich_backup.web.archives.export_tar", side_effect=fake_export), \
+                patch("immich_backup.web.archives.archive_tar_bytes", return_value=None), \
+                patch("immich_backup.web.status.active_job", return_value=""):
+            status, body = self.client.request("GET", "/api/archives/" + name + "/download")
+        self.assertEqual(status, 200)
+        self.assertNotIn("content-length", self.client.headers)
         with patch("immich_backup.web.archives.export_tar", side_effect=lambda *_a: FakeExport(b"", b"Archive not found\n", 2)), \
+                patch("immich_backup.web.archives.archive_tar_bytes", return_value=None), \
                 patch("immich_backup.web.status.active_job", return_value=""):
             status, body = self.client.json("GET", "/api/archives/" + name + "/download")
         self.assertEqual(status, 400)
