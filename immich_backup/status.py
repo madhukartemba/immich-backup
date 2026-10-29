@@ -171,7 +171,7 @@ PAGE = r"""<!DOCTYPE html>
     </nav>
     <section class="hero">
       <div class="title">
-        <p class="kicker">On this VM</p>
+        <p class="kicker">Status</p>
         <h1 id="state">Checking</h1>
       </div>
       <div class="meter">
