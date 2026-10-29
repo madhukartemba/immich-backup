@@ -1,8 +1,0 @@
-[Unit]
-Description=Publish the latest SMART snapshot
-
-[Service]
-Type=oneshot
-Environment=PYTHONPATH=/opt/immich-backup
-WorkingDirectory=/opt/immich-backup
-ExecStart=/usr/bin/python3 -m immich_backup publish --config /etc/immich-backup/config.ini

@@ -143,7 +143,11 @@ def run(cfg):
     check_backup_disk(cfg)
     check_media(cfg)
     if not os.path.isfile(os.path.join(cfg.repo, "config")):
-        fail(cfg, "Borg repository is missing")
+        os.makedirs(cfg.repo, exist_ok=True)
+        init = subprocess.run(["borg", "init", "--encryption=none"], env=borg_env(cfg))
+        if init.returncode != 0:
+            fail(cfg, "could not create the Borg repository")
+        log(cfg, "created Borg repository")
     free = avail_kb(cfg.backup_mount)
     if not repo_has_data(cfg.repo):
         if free < cfg.initial_free_gb * 1024 * 1024:

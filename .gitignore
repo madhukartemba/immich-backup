@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.DS_Store
+
+# systemd units written by the installer
+dist/
+
+# a real machine config, not the example files
+config.ini
+*.local.ini
+
+# runtime state from a local run
+auth.json
+*.log
+*.lock
+.env

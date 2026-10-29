@@ -1,9 +1,0 @@
-[Unit]
-Description=Weekly Immich Borg integrity check
-
-[Timer]
-OnCalendar=Sun *-*-* 10:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target

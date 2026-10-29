@@ -1,39 +1,59 @@
 # Immich backup
 
-This is the backup program used for an Immich server: the nightly Borg backup, the status page, and the disk health checks. Paths, disk identities, the schedule, and mail are in one config file, so another Immich install can use the same program.
+Nightly, versioned backups for an Immich library, and a status page on the same machine.
 
-The running virtual machine has not been switched to this copy.
+Each archive holds the photos and the database together, so a restored library still has its albums, people, and places. Open the page to see the last backup, start one now, or rebuild Immich on another computer from the backup disk.
 
-## Commands
+A successful backup stays quiet. Failures and low-disk warnings are mailed to you.
 
-Run from this directory:
+## Install
+
+Debian or Ubuntu, with Python 3.10 or newer. The photo disk and the backup disk should already be mounted.
 
 ```bash
-PYTHONPATH=. python3 -m immich_backup check-config --config config.vm.example.ini
-PYTHONPATH=. python3 -m immich_backup install --config config.vm.example.ini --output dist/vm
-PYTHONPATH=. python3 -m immich_backup install --config config.host.example.ini --output dist/host
+git clone https://github.com/madhukartemba/immich-backup.git
+cd immich-backup
+sudo python3 install.py
 ```
 
-On the Immich machine the useful commands are `backup`, `check`, `archives`, `serve`, and `store`.
+The installer adds Borg, rsync, and Docker when Docker is not already installed. It copies the program to `/opt/immich-backup`, writes `/etc/immich-backup/config.ini` when that file is missing, and starts the status page on port **8090**.
 
-On the Proxmox host the useful commands are `health`, `publish`, `spindown`, and `notify`. `health` reads the backup disk only when that disk is already awake, and skips it when it is asleep. `publish` and `store` only read saved files.
+```text
+http://<this-machine>:8090
+```
 
-The program is Python 3.10 or newer and uses the standard library only. Copy `config.vm.example.ini` or `config.host.example.ini` to `config.ini` for a real machine. `config.ini` stays on that machine.
+Disks are left as they are. Running the installer again refreshes the program and keeps the config you already have.
+
+## First visit
+
+Create an account. Then choose one of the two paths.
+
+**Set up a new backup.** For a machine that already runs Immich. Choose the photo drive and the backup drive, then the alert email, the backup time, and how many days to keep. The first backup creates the repository. Seven days are kept, the backup runs at 01:00, and the repository is checked on Sunday at 10:00. Settings can change all three.
+
+**Restore this machine.** For an empty computer. Choose the backup drive, a different photo drive, and one archive. Restore installs Immich, copies the library onto the photo drive, and loads the database from that same archive. The backup drive is only read.
+
+After you sign in, the status page has **Run backup now** and **Check repository**.
+
+When the backup drive is a hard disk, Settings shows **Sleep when idle** and the number of minutes to wait. The check does not wake a drive that is already asleep.
+
+## Disk health on another computer
+
+Use this when the backup disk is plugged into a different machine, such as the Proxmox host:
+
+```bash
+sudo python3 install.py --host
+```
+
+That installs hard-drive sleep and the disk-health check. The nightly backup stays on the Immich machine. Set the disk paths in `/etc/immich-backup/config.ini` on the host before expecting sleep or health mail.
 
 ## Tests
 
-The tests use temporary directories and stand-ins for disks, Borg, and Docker.
-
 ```bash
-PYTHONPATH=. python3 -m unittest tests.test_flow tests.test_restore tests.test_setup tests.test_app
+PYTHONPATH=. python3 -m unittest tests.test_flow tests.test_restore tests.test_setup tests.test_app tests.test_install
 ```
 
-## What a future install needs
+The tests use temporary directories and stand-ins for disks, Borg, Docker, and apt.
 
-Copy this directory to `/opt/immich-backup`. Copy the matching example config to `/etc/immich-backup/config.ini` and change the disk UUIDs, serial, paths, and mail address. Create the Borg repository separately. Put the backup filesystem UUID in `/mnt/immich-backup/.backup-disk`. Then install the systemd units from `install` and enable the timers.
+## This server
 
-The status page asks for an account the first time it is opened. After the account, choose a new backup or restore this machine. Restore installs Docker and Immich, copies the library onto the photo drive, and loads the database from the archive. The backup drive is only read, and nothing is formatted. A new backup asks for the photo drive and the backup drive, then the alert email, backup time, retention, and password. When the backup drive is a hard disk, Settings also has the idle time before it sleeps. Run backup now and Check repository are on the status page after signing in. A successful backup still does not send mail.
-
-## Trying it on this virtual machine
-
-Keep the current scripts until one night with this program has finished. Copy the app to `/opt/immich-backup` on the Immich VM, install `config.vm.example.ini` as `/etc/immich-backup/config.ini`, and point the backup, check, and status services at `python3 -m immich_backup`. Do that while the backup service is inactive. The host health checks can stay as they are until the VM copy has run once.
+The Immich virtual machine is still on the earlier scripts. Move it to this program after one night from the installer has finished, and do that while the backup service is inactive.

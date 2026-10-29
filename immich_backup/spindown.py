@@ -37,8 +37,6 @@ def should_standby(cfg, idle_seconds, power):
 
 
 def run(cfg):
-    if not cfg.backup_disk:
-        raise SystemExit("backup_disk is not set")
     path = cfg.config_path
     last = ""
     since = time.time()
