@@ -24,7 +24,17 @@ from immich_backup.restore import (
     os_identity,
     run,
 )
-from immich_backup.status import active_job, configure, failure_text, restore_in_progress, restore_step
+from immich_backup.archives import export_tar
+from immich_backup.status import (
+    active_job,
+    configure,
+    failed_kind,
+    failure_headline,
+    failure_text,
+    latest_outcome,
+    restore_in_progress,
+    restore_step,
+)
 
 
 SECRET = "SECRET_DB_PASSWORD"
@@ -322,6 +332,40 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(active_job(running, lines), "restore")
             self.assertEqual(active_job("", lines), "")
             self.assertEqual(active_job("borg create ::x /mnt\n", []), "backup")
+
+    def test_a_backup_failure_after_a_restore_is_not_a_restore_failure(self):
+        finished = [
+            "2026-10-29T09:39:24+00:00 starting restore of " + ARCHIVE,
+            "2026-10-29T09:45:00+00:00 restore finished, Immich is running",
+        ]
+        space = finished + ["2026-10-29T09:50:00+00:00 FAILED less than 10 GB free on the backup disk"]
+        self.assertEqual(failure_text(space), ("backup", "less than 10 GB free on the backup disk"))
+        self.assertEqual(failure_headline("backup"), "Backup failed")
+        self.assertEqual(latest_outcome(space), ("backup", "failed"))
+        dump = finished + ["2026-10-29T09:50:00+00:00 FAILED pg_dump failed"]
+        self.assertEqual(failure_text(dump)[0], "backup")
+        self.assertEqual(failed_kind("restore", "could not open the archive"), "restore")
+        opened = [
+            "2026-10-29T09:39:24+00:00 starting restore of " + ARCHIVE,
+            "2026-10-29T09:40:00+00:00 FAILED could not open the archive",
+        ]
+        self.assertEqual(failure_text(opened), ("restore", "could not open the archive"))
+        self.assertEqual(latest_outcome(opened), ("restore", "failed"))
+
+    def test_export_names_one_archive_and_does_not_use_a_shell(self):
+        with tempfile.TemporaryDirectory(prefix="immich-backup-test-") as tmp:
+            cfg = load(write_config(tmp))
+            with patch("immich_backup.archives.subprocess.Popen") as popen:
+                export_tar(cfg, ARCHIVE)
+            args, kwargs = popen.call_args
+            self.assertEqual(args[0][:2], ["borg", "export-tar"])
+            self.assertTrue(args[0][2].endswith("::" + ARCHIVE))
+            self.assertEqual(args[0][3], "-")
+            self.assertNotIn("shell", kwargs)
+            self.assertEqual(popen.call_count, 1)
+            with self.assertRaises(ValueError):
+                export_tar(cfg, "../etc/passwd")
+            self.assertEqual(popen.call_count, 1)
 
     def test_failure_reason_names_the_job(self):
         restore_lines = [

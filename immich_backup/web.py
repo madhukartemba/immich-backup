@@ -2,9 +2,10 @@
 
 import json
 import os
-from urllib.parse import parse_qs
+import threading
+from urllib.parse import parse_qs, unquote
 
-from immich_backup import auth, actions, disks, restore, status
+from immich_backup import archives, auth, actions, disks, restore, status
 from immich_backup.config import load, update
 
 SHELL = """<!DOCTYPE html>
@@ -378,7 +379,7 @@ SETTINGS = page(
       fillDrive(document.querySelector("#drives [name=photos]"), rows, data.photos);
       fillDrive(document.querySelector("#drives [name=backup]"), rows, data.backup);
       showSleep(data);
-      if (data.job === "restore" || data.job === "backup") {
+      if (data.job === "restore" || data.job === "backup" || data.job === "download") {
         document.querySelectorAll("#drives select, #drives button").forEach((node) => { node.disabled = true; });
         mark("drive-error", "Drives cannot change while a " + data.job + " is running.", false);
       }
@@ -486,6 +487,68 @@ def has_repo(mount):
     if mount in {"", "/"}:
         return False
     return os.path.isfile(os.path.join(mount, "immich-borg", "config"))
+
+
+_export_lock = threading.Lock()
+
+
+def send_archive(handler, archive):
+    """Stream one archive to the browser. Nothing is buffered beyond one chunk."""
+    if not _export_lock.acquire(blocking=False):
+        raise ValueError("A download is already running")
+    proc = None
+    try:
+        job = status.active_job()
+        if job:
+            raise ValueError("Wait until the " + job + " finishes")
+        archives.exporting = True
+        try:
+            proc = archives.export_tar(status.C, archive)
+        except FileNotFoundError:
+            raise ValueError("Borg is not installed") from None
+        errors = []
+
+        def drain():
+            try:
+                errors.append(proc.stderr.read() or b"")
+            except Exception:
+                errors.append(b"")
+
+        drainer = threading.Thread(target=drain, daemon=True)
+        drainer.start()
+        first = proc.stdout.read(1024 * 1024)
+        if not first:
+            try:
+                proc.wait(timeout=20)
+            except Exception:
+                pass
+            drainer.join(timeout=2)
+            text = b"".join(errors).decode("utf-8", "replace").strip()
+            line = text.splitlines()[-1][:200] if text else "Could not read that archive"
+            raise ValueError(line)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/x-tar")
+        handler.send_header("Content-Disposition", 'attachment; filename="%s.tar"' % archive)
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.end_headers()
+        handler.wfile.write(first)
+        while True:
+            chunk = proc.stdout.read(1024 * 1024)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        archives.exporting = False
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+        _export_lock.release()
 
 
 def refuse_while(jobs, message):
@@ -637,6 +700,14 @@ def dispatch(handler, method):
                     row["has_repo"] = has_repo(row.get("mount") or "")
             send_json(handler, 200, rows)
             return True
+        if method == "GET" and path.startswith("/api/archives/") and path.endswith("/download"):
+            if not require_user(handler):
+                return True
+            archive = unquote(path[len("/api/archives/"):-len("/download")])
+            if "/" in archive or not restore.ARCHIVE_RE.match(archive):
+                raise ValueError("Choose an archive")
+            send_archive(handler, archive)
+            return True
         if method == "GET" and path == "/api/restore/archives":
             if not require_user(handler):
                 return True
@@ -701,7 +772,7 @@ def dispatch(handler, method):
             if not require_user(handler):
                 return True
             data = read_json(handler)
-            refuse_while({"restore", "backup", "check"}, "Wait until the JOB finishes before starting a restore")
+            refuse_while({"restore", "backup", "check", "download"}, "Wait until the JOB finishes before starting a restore")
             if str(data.get("confirm") or "") != "restore":
                 raise ValueError('Type "restore" to confirm')
             archive = str(data.get("archive") or "")
@@ -744,7 +815,7 @@ def dispatch(handler, method):
                 return True
             if status.borg_running():
                 raise ValueError("Wait until the backup finishes before changing drives")
-            refuse_while({"restore", "backup"}, "Wait until the JOB finishes before changing drives")
+            refuse_while({"restore", "backup", "download"}, "Wait until the JOB finishes before changing drives")
             data = read_json(handler)
             save_drives(str(data.get("photos") or ""), str(data.get("backup") or ""))
             send_json(handler, 200, {"ok": True, "message": "Saved"})
@@ -767,7 +838,7 @@ def dispatch(handler, method):
                 return True
             read_json(handler)
             command = "backup" if path.endswith("backup") else "check"
-            refuse_while({"restore"}, "Wait until the restore finishes")
+            refuse_while({"restore", "download"}, "Wait until the JOB finishes")
             message = actions.start(status.C, command)
             status.invalidate_cache()
             send_json(handler, 200, {"ok": True, "message": message})

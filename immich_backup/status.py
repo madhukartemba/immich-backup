@@ -281,6 +281,8 @@ function render(d) {
   $("settings").setAttribute("aria-disabled", job === "restore" ? "true" : "false");
   if (job === "restore") {
     $("barnote").textContent = "Backups, checks, and settings are paused until the restore finishes.";
+  } else if (job === "download") {
+    $("barnote").textContent = "Downloading an archive. Backups and checks wait until it finishes.";
   } else if (d.state === "running" && d.bytes_per_sec) {
     const mb = d.bytes_per_sec / 1024 / 1024;
     let note = (mb >= 10 ? mb.toFixed(0) : mb.toFixed(1)) + " MB/s";
@@ -292,7 +294,9 @@ function render(d) {
   const rows = d.archives || [];
   $("archives").className = rows.length ? "" : "empty";
   $("archives").innerHTML = rows.length
-    ? "<table>" + rows.map(a => "<tr><td>" + esc(a.name) + "</td><td class='when'>" + esc(clock(a.time, true) || a.time) + "</td></tr>").join("") + "</table>"
+    ? "<table>" + rows.map(a => "<tr><td>" + esc(a.name) + "</td><td class='when'>" + esc(clock(a.time, true) || a.time) +
+        "</td><td class='when'><button type='button' class='quiet dl' data-archive='" + esc(a.name) + "'" +
+        (job ? " disabled" : "") + ">Download</button></td></tr>").join("") + "</table>"
     : esc(d.archives_note || "Waiting for the first finished copy.");
   $("log").textContent = (d.log && d.log.length) ? d.log.map(localLog).join("\n") : "No log yet.";
   const recover = $("recover");
@@ -300,8 +304,10 @@ function render(d) {
     recover.hidden = false;
     $("reason").textContent = d.failure || d.detail || "The last attempt did not finish.";
     const restore = d.failure_kind === "restore";
+    const space = /free on the backup disk|not enough free space/.test(d.failure || "");
     $("again-restore").textContent = restore ? "Try restore again" : "Restore this machine instead";
-    $("again-backup").textContent = restore ? "Set up a new backup instead" : "Choose the drives again";
+    $("again-backup").textContent = space ? "Change the free-space limit" : (restore ? "Set up a new backup instead" : "Choose the drives again");
+    $("again-backup").setAttribute("href", space ? "/settings" : "/setup?step=backup");
   } else {
     recover.hidden = true;
   }
@@ -331,6 +337,50 @@ async function act(url, confirmText, button) {
   $("barnote").textContent = data.message || data.error || "";
   arm(300);
 }
+async function downloadArchive(name) {
+  const filename = name + ".tar";
+  const url = "/api/archives/" + encodeURIComponent(name) + "/download";
+  if (window.isSecureContext && window.showSaveFilePicker) {
+    let handle = null;
+    try {
+      handle = await showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: "Tar archive", accept: { "application/x-tar": [".tar"] } }]
+      });
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      handle = null;
+    }
+    if (handle) {
+      $("barnote").textContent = "Downloading " + filename;
+      try {
+        const response = await fetch(url, { cache: "no-store" });
+        if (response.status === 401) { location.href = "/login"; return; }
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || "Could not download that archive");
+        }
+        await response.body.pipeTo(await handle.createWritable());
+        $("barnote").textContent = "Saved " + filename;
+      } catch (error) {
+        $("barnote").textContent = error.message || "Could not download that archive";
+      }
+      arm(300);
+      return;
+    }
+  }
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+$("archives").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-archive]");
+  if (!button || button.disabled) return;
+  downloadArchive(button.getAttribute("data-archive"));
+});
 $("run").onclick = () => act("/api/actions/backup", "Start a backup now? The backup disk will spin up.", $("run"));
 $("checkrepo").onclick = () => act("/api/actions/check", "Check the repository now? The backup disk will spin up.", $("checkrepo"));
 $("logout").onclick = () => act("/api/logout");
@@ -488,10 +538,51 @@ def write_rate(used):
     return rate
 
 
+def open_job(line, job):
+    """Which job a log line belongs to. A finished job does not claim the next failure."""
+    padded = " " + line
+    if " starting restore " in padded:
+        return "restore"
+    if " starting local borg create" in line or line.endswith("starting borg create"):
+        return "backup"
+    if " starting repository check" in line:
+        return "check"
+    if (
+        " restore finished" in padded
+        or "borg create exit" in line
+        or "repository check passed" in line
+        or "repository check failed" in line
+        or "repository check skipped" in line
+        or " FAILED " in padded
+    ):
+        return ""
+    return job
+
+
+def failed_kind(job, line):
+    """A failure belongs to the job that was open, not to an older one."""
+    if job == "restore" or (not job and "restore" in line.lower()):
+        return "restore"
+    if job == "check":
+        return "check"
+    return "backup"
+
+
+def failure_headline(kind):
+    if kind == "restore":
+        return "Restore failed"
+    if kind == "check":
+        return "Check failed"
+    return "Backup failed"
+
+
 def latest_outcome(lines):
     """The newest finished backup, restore, or repository check in the log."""
     outcome = ("", "")
+    job = ""
     for line in lines:
+        previous = job
+        job = open_job(line, job)
         if "repository check passed" in line:
             outcome = ("check", "passed")
         elif "repository check failed" in line:
@@ -501,7 +592,7 @@ def latest_outcome(lines):
         elif "restore finished" in line:
             outcome = ("restore", "ok")
         elif " FAILED " in (" " + line):
-            outcome = ("restore", "failed") if "restore" in line.lower() else ("backup", "failed")
+            outcome = (failed_kind(previous, line), "failed")
         elif "borg create exit" in line:
             match = re.search(r"borg create exit (\d+)", line)
             code = int(match.group(1)) if match else 2
@@ -722,18 +813,14 @@ def without_stale_space_failures(lines, avail):
 
 
 def failure_text(lines):
+    job = ""
     kind = ""
     reason = ""
     for line in lines:
-        padded = " " + line
-        if " starting restore " in padded:
-            kind = "restore"
-        if " starting local borg create" in line:
-            kind = "backup"
-        if " FAILED " in padded:
+        if " FAILED " in (" " + line):
             reason = line.split(" FAILED ", 1)[1].strip()
-            if kind == "" and "restore" in reason.lower():
-                kind = "restore"
+            kind = failed_kind(job, line)
+        job = open_job(line, job)
     return kind, reason
 
 
@@ -792,8 +879,15 @@ def restore_step(lines):
     return progress, detail, archive
 
 
+def archives_module_exporting():
+    from immich_backup import archives
+    return bool(getattr(archives, "exporting", False))
+
+
 def active_job(process_text=None, lines=None):
-    """The job that is running now: restore, backup, check, or nothing."""
+    """The job that is running now: restore, backup, check, download, or nothing."""
+    if archives_module_exporting():
+        return "download"
     if process_text is None:
         _, process_text, _ = run(["ps", "-eo", "args="])
     if lines is None:
@@ -806,6 +900,8 @@ def active_job(process_text=None, lines=None):
         return "backup"
     if "borg check" in process_text:
         return "check"
+    if "borg export-tar" in process_text:
+        return "download"
     return ""
 
 
@@ -856,7 +952,7 @@ def status():
         detail = "Reading the backup archives."
     elif active == "failed" or " FAILED " in (" " + last):
         state = "failed"
-        headline = "Restore failed" if kind == "restore" else "Backup failed"
+        headline = failure_headline(kind)
         detail = reason or "The last attempt did not finish."
     else:
         job, result = latest_outcome(shown)
@@ -878,7 +974,7 @@ def status():
             state, headline, detail = "ok", "Restored", "Immich was restored from the backup and is running."
         elif result == "failed":
             state = "failed"
-            headline = "Restore failed" if job == "restore" else "Backup failed"
+            headline = failure_headline(job)
             detail = reason or "The last attempt did not finish."
         else:
             state, headline = "ok", "Idle"
@@ -924,6 +1020,8 @@ def status():
         job = "backup"
     elif headline == "Checking":
         job = "check"
+    elif archives_module_exporting() or "borg export-tar" in process_text:
+        job = "download"
     else:
         job = ""
 

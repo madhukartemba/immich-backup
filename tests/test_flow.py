@@ -63,6 +63,7 @@ class Client:
             connection.request(method, path, body=data, headers=headers)
             response = connection.getresponse()
             raw = response.read()
+            self.headers = {key.lower(): value for key, value in response.getheaders()}
             cookie = response.getheader("Set-Cookie") or ""
             if cookie.startswith("ib_session="):
                 value = cookie.split(";", 1)[0]
@@ -292,7 +293,11 @@ class FlowTests(unittest.TestCase):
         status, setup = self.client.request("GET", "/setup")
         self.assertEqual(status, 200)
         self.assertIn(b">Back<", setup)
-        self.assertIn(b"Try restore again", self.client.request("GET", "/")[1])
+        page = self.client.request("GET", "/")[1]
+        self.assertIn(b"Try restore again", page)
+        self.assertIn(b"Download", page)
+        self.assertIn(b"showSaveFilePicker", page)
+        self.assertIn(b"Change the free-space limit", page)
         self.assertIn(b"Set up a new backup instead", self.client.request("GET", "/")[1])
         self.client.cookie = ""
         self.assertEqual(self.client.request("GET", "/setup")[0], 302)
@@ -374,6 +379,60 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(status, 400)
             status, settings = self.client.json("GET", "/api/settings")
             self.assertEqual(settings["job"], "restore")
+
+    def test_archive_download_is_one_signed_in_archive(self):
+        import io
+        from immich_backup import archives
+
+        class FakeExport:
+            def __init__(self, out=b"", err=b"", code=0):
+                self.stdout = io.BytesIO(out)
+                self.stderr = io.BytesIO(err)
+                self.code = code
+                self.killed = False
+
+            def poll(self):
+                return self.code
+
+            def wait(self, timeout=None):
+                return self.code
+
+            def kill(self):
+                self.killed = True
+
+        name = "immich-2026-10-29_084159"
+        started = []
+
+        def fake_export(_cfg, archive):
+            started.append(archive)
+            return FakeExport(b"ustar-bytes")
+
+        status, body = self.client.json("GET", "/api/archives/" + name + "/download")
+        self.assertEqual(status, 401)
+        self.client.json("POST", "/api/setup/account", {"email": "owner@example.com", "password": "correct-horse"})
+        status, body = self.client.json("GET", "/api/archives/not-an-archive/download")
+        self.assertEqual(status, 400)
+        self.assertEqual(started, [])
+        with patch("immich_backup.web.archives.export_tar", side_effect=fake_export), \
+                patch("immich_backup.web.status.active_job", return_value="backup"):
+            status, body = self.client.json("GET", "/api/archives/" + name + "/download")
+        self.assertEqual(status, 400)
+        self.assertIn("backup finishes", body["error"])
+        self.assertEqual(started, [])
+        with patch("immich_backup.web.archives.export_tar", side_effect=fake_export), \
+                patch("immich_backup.web.status.active_job", return_value=""):
+            status, body = self.client.request("GET", "/api/archives/" + name + "/download")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"ustar-bytes")
+        self.assertIn(name + ".tar", self.client.headers.get("content-disposition", ""))
+        self.assertEqual(started, [name])
+        self.assertFalse(archives.exporting)
+        with patch("immich_backup.web.archives.export_tar", side_effect=lambda *_a: FakeExport(b"", b"Archive not found\n", 2)), \
+                patch("immich_backup.web.status.active_job", return_value=""):
+            status, body = self.client.json("GET", "/api/archives/" + name + "/download")
+        self.assertEqual(status, 400)
+        self.assertIn("Archive not found", body["error"])
+        self.assertFalse(archives.exporting)
 
     def test_sleep_settings_are_only_for_a_hard_drive(self):
         self.client.json("POST", "/api/setup/account", {"email": "owner@example.com", "password": "correct-horse"})

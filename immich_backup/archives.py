@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 
+exporting = False
+
 
 def refresh(cfg):
     env = os.environ.copy()
@@ -36,3 +38,19 @@ def refresh(cfg):
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump({"repo": repo_id, "archives": rows}, fh)
     os.replace(tmp, cfg.archive_cache)
+
+
+def export_tar(cfg, archive):
+    """Stream one archive as a tar file. The name is restricted to an Immich archive."""
+    from immich_backup.restore import ARCHIVE_RE
+    if not ARCHIVE_RE.match(archive or ""):
+        raise ValueError("Choose an archive")
+    env = os.environ.copy()
+    env["BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK"] = "yes"
+    env["BORG_REPO"] = cfg.repo
+    return subprocess.Popen(
+        ["borg", "export-tar", cfg.repo + "::" + archive, "-"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )

@@ -2,7 +2,7 @@
 
 Nightly, versioned backups for an Immich library, and a status page on the same machine.
 
-Each archive holds the photos and the database together, so a restored library still has its albums, people, and places. Open the page to see the last backup, start one now, or rebuild Immich on another computer from the backup disk.
+Each archive holds the photos and the database together, so a restored library still has its albums, people, and places. Open the page to see the last backup, start one now, or rebuild Immich on another computer from the backup disk. A signed-in user can download one archive as a tar file; the browser saves it, and asks where to put it when that is available.
 
 A successful backup stays quiet. Failures and low-disk warnings are mailed to you.
 
