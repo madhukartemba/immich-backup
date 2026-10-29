@@ -74,6 +74,7 @@ BASE_PACKAGES = (
     "python3",
     "rsync",
     "borgbackup",
+    "hdparm",
     "smartmontools",
 )
 HOST_PACKAGES = ("hdparm", "smartmontools")

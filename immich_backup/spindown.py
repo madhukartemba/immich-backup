@@ -21,7 +21,10 @@ def diskstats(name):
 
 def power_state(dev):
     """hdparm -C reads the power mode and leaves a standby disk asleep."""
-    proc = subprocess.run(["hdparm", "-C", dev], text=True, capture_output=True)
+    try:
+        proc = subprocess.run(["hdparm", "-C", dev], text=True, capture_output=True)
+    except FileNotFoundError:
+        return ""
     for line in (proc.stdout + "\n" + proc.stderr).splitlines():
         if "drive state" in line:
             return line.split(":", 1)[1].replace(" ", "")

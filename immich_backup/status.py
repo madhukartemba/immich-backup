@@ -767,7 +767,10 @@ def backup_spin(cfg, power_fn=None):
         dev = device_for_mount(cfg.backup_mount)
     if not dev or not os.path.exists(dev):
         return ""
-    return spin_label(power_fn(dev))
+    try:
+        return spin_label(power_fn(dev))
+    except FileNotFoundError:
+        return ""
 
 
 def space_level(backup):
