@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -65,6 +66,83 @@ def primary_path(cfg):
             found.append(path)
     found.sort(key=lambda path: (not os.path.basename(os.path.realpath(path)).endswith("n1"), path))
     return found[0] if found else ""
+
+
+def unsupported(data):
+    if not isinstance(data, dict):
+        return True
+    support = data.get("smart_support") or {}
+    if support.get("available") is False:
+        return True
+    text = str(data.get("unreadable") or "").lower()
+    return "unavailable" in text or "not supported" in text
+
+
+def device_for_mount(mount):
+    if not mount:
+        return ""
+    found = subprocess.run(
+        ["findmnt", "-n", "-o", "SOURCE", "-T", mount],
+        text=True,
+        capture_output=True,
+    )
+    source = (found.stdout or "").split()
+    if found.returncode != 0 or not source:
+        return ""
+    parent = subprocess.run(
+        ["lsblk", "-no", "PKNAME", source[0]],
+        text=True,
+        capture_output=True,
+    )
+    name = (parent.stdout or "").split()
+    if parent.returncode != 0 or not name:
+        return ""
+    return "/dev/" + name[0]
+
+
+def during_backup(cfg, smartctl_fn=None, device_fn=None):
+    """Read SMART after a backup has spun the disks up. A standby backup disk is left asleep."""
+    smartctl_fn = smartctl_fn or smartctl
+    device_fn = device_fn or device_for_mount
+    if smartctl_fn is smartctl and shutil.which("smartctl") is None:
+        return ["smartctl is not installed"]
+    photo = primary_path(cfg) or device_fn(cfg.media_mount)
+    backup = cfg.backup_disk or device_fn(cfg.backup_mount)
+    checks = []
+    if backup:
+        checks.append(("backup", cfg.backup_disk_name or "Backup disk", backup, True))
+    if photo and os.path.realpath(photo) != os.path.realpath(backup or ""):
+        checks.append(("primary", cfg.primary_name or "Photo disk", photo, False))
+    found = []
+    for key, name, dev, skip in checks:
+        if not dev or not os.path.exists(dev):
+            continue
+        data = smartctl_fn(dev, skip)
+        if data is None:
+            continue
+        if unsupported(data):
+            remember_note(cfg, key, True, "Not available")
+            continue
+        remember(cfg, key, data, name)
+        found.extend(item for item in problems(name, data) if "could not be read" not in item)
+    return found
+
+
+def remember_note(cfg, key, ok, summary):
+    if not key:
+        return
+    os.makedirs(cfg.state_dir, exist_ok=True)
+    current = load_json(cfg.smart_file)
+    current[key] = {
+        "ok": bool(ok),
+        "checked_at": datetime.now().strftime("%a %H:%M"),
+        "at": time.time(),
+        "summary": summary,
+    }
+    tmp = cfg.smart_file + "." + str(os.getpid()) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(current, fh)
+    os.replace(tmp, cfg.smart_file)
 
 
 def remember(cfg, key, data, label):

@@ -51,7 +51,8 @@ class InstallerTests(unittest.TestCase):
             source = os.path.join(tmp, "etc", "apt", "sources.list.d", "docker.list")
             self.assertIn("linux/debian trixie", Path(source).read_text(encoding="utf-8"))
         flat = [args for args, _env in runner.commands]
-        self.assertIn(["apt-get", "install", "-y", "ca-certificates", "curl", "gnupg", "python3", "rsync", "borgbackup"], flat)
+        self.assertIn(["apt-get", "install", "-y", "ca-certificates", "curl", "gnupg", "python3", "rsync", "borgbackup", "smartmontools"], flat)
+        self.assertIn(["systemctl", "disable", "--now", "smartd"], flat)
         self.assertTrue(any("docker-ce" in args for args in flat))
         self.assertIn(["systemctl", "enable", "--now", "immich-backup-status.service"], flat)
         self.assertIn(["systemctl", "enable", "--now", "immich-backup.timer"], flat)

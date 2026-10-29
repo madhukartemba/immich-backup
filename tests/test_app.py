@@ -5,9 +5,10 @@ import unittest
 
 from immich_backup.backup import space_note
 from immich_backup.config import load
+from immich_backup.health import during_backup
 from immich_backup.install import write_units
 from immich_backup.spindown import should_standby
-from immich_backup.status import configure, last_success
+from immich_backup.status import configure, last_success, latest_outcome
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,6 +49,59 @@ class AppTests(unittest.TestCase):
             cfg.repo = old
         self.assertEqual(result["when"], "Tue 02:00")
         self.assertEqual(result["took"], "30 sec")
+
+    def test_a_later_repository_touch_keeps_the_success(self):
+        cfg = load(os.path.join(ROOT, "config.vm.example.ini"))
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "repo"))
+            config = os.path.join(tmp, "repo", "config")
+            open(config, "w", encoding="utf-8").close()
+            os.utime(config, (2_000_000_000, 2_000_000_000))
+            cfg.repo = os.path.join(tmp, "repo")
+            configure(cfg)
+            result = last_success([
+                "2026-10-29T08:41:58+00:00 starting local borg create",
+                "2026-10-29T08:42:04+00:00 borg create exit 0",
+                "2026-10-29T08:42:05+00:00 prune exit 0",
+            ])
+        self.assertEqual(result["took"], "6 sec")
+        self.assertEqual(latest_outcome([
+            "2026-10-29T08:42:04+00:00 borg create exit 0",
+            "2026-10-29T08:42:05+00:00 prune exit 0",
+        ]), ("backup", "ok"))
+        self.assertEqual(latest_outcome([
+            "2026-10-29T08:42:05+00:00 prune exit 0",
+            "2026-10-29T08:46:00+00:00 repository check passed",
+        ]), ("check", "passed"))
+
+    def test_backup_reads_smart_and_leaves_a_sleeping_disk_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            disk = os.path.join(tmp, "backup-disk")
+            open(disk, "w", encoding="utf-8").close()
+            cfg = SimpleNamespace(
+                backup_disk=disk,
+                backup_disk_name="Backup disk",
+                media_mount="",
+                primary_match="",
+                primary_name="Photo disk",
+                state_dir=tmp,
+                smart_file=os.path.join(tmp, "smart.json"),
+            )
+            skipped = []
+
+            def asleep(dev, skip):
+                skipped.append(skip)
+                return None
+
+            self.assertEqual(during_backup(cfg, smartctl_fn=asleep, device_fn=lambda mount: ""), [])
+            self.assertEqual(skipped, [True])
+            self.assertFalse(os.path.exists(cfg.smart_file))
+            notes = during_backup(
+                cfg,
+                smartctl_fn=lambda dev, skip: {"smart_status": {"passed": False}},
+                device_fn=lambda mount: "",
+            )
+            self.assertIn("Backup disk: SMART health check failed", notes)
 
     def test_hard_drive_sleeps_only_after_it_has_been_idle(self):
         cfg = SimpleNamespace(spindown_enabled=True, spindown_idle_seconds=600)

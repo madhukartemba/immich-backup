@@ -185,7 +185,21 @@ def run(cfg):
         refresh(cfg)
     except Exception:
         log(cfg, "archive list cache update failed")
+    try:
+        from immich_backup.health import during_backup
+        smart_notes = during_backup(cfg)
+    except Exception:
+        smart_notes = []
+        log(cfg, "SMART check failed")
+    else:
+        if smart_notes:
+            log(cfg, "SMART warning " + "; ".join(smart_notes))
+        else:
+            log(cfg, "SMART check finished")
     note = space_note(cfg, avail_kb(cfg.backup_mount))
+    if smart_notes:
+        extra = " SMART: " + "; ".join(smart_notes) + "."
+        note = (note + extra) if note else extra.strip()
     if rc == 1 or prune_rc != 0:
         message = "WARNING Immich backup archive was created. borg exit " + str(rc) + ". prune exit " + str(prune_rc) + "."
         if note:

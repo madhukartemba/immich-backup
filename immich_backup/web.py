@@ -262,6 +262,13 @@ SETTINGS = page(
     """
     <h1>Settings</h1>
     <p><a class="btn" href="/">Back to status</a></p>
+    <form id="drives">
+      <p>Choose the drive that holds the photos and the drive that holds the backups. Both must already be mounted. The next backup uses the backup drive you pick. Archives already stored on the previous drive stay there.</p>
+      <label>Photo drive<select name="photos" required></select></label>
+      <label>Backup drive<select name="backup" required></select></label>
+      <p class="error" id="drive-error"></p>
+      <button type="submit">Save drives</button>
+    </form>
     <form id="alerts">
       <label>Alert email<input name="email" type="email" required></label>
       <label>Nightly backup time<input name="label" required placeholder="01:00"></label>
@@ -285,21 +292,50 @@ SETTINGS = page(
     </form>
     """,
     """
-    fetch("/api/settings").then(response => {
-      if (response.status === 401) location.href = "/login";
-      return response.json();
-    }).then(data => {
-      document.querySelector("[name=email]").value = data.email || "";
-      document.querySelector("[name=label]").value = data.label || "";
-      document.querySelector("[name=keep_daily]").value = data.keep_daily || 7;
-      document.querySelector("[name=warn_gb]").value = data.warn_gb || "50,20,10";
+    function fillDrive(select, rows, current) {
+      select.innerHTML = "";
+      rows.filter((row) => row.mount !== "/").forEach((row) => {
+        const option = document.createElement("option");
+        option.value = row.mount;
+        const size = row.size ? Math.round(row.size / 1024 / 1024 / 1024) + " GB" : "";
+        option.textContent = (row.label || row.mount) + "  " + row.mount + (size ? "  " + size : "");
+        option.selected = row.mount === current;
+        select.appendChild(option);
+      });
+    }
+    function showSleep(data) {
       const sleep = document.getElementById("sleep");
       sleep.classList.toggle("hidden", !data.hdd);
       if (data.hdd) {
         document.querySelector("[name=spindown_enabled]").checked = !!data.spindown_enabled;
         document.querySelector("[name=idle_minutes]").value = data.spindown_idle_minutes || 10;
       }
+    }
+    Promise.all([
+      fetch("/api/settings").then((response) => {
+        if (response.status === 401) location.href = "/login";
+        return response.json();
+      }),
+      fetch("/api/disks").then((response) => response.json())
+    ]).then(([data, rows]) => {
+      document.querySelector("[name=email]").value = data.email || "";
+      document.querySelector("[name=label]").value = data.label || "";
+      document.querySelector("[name=keep_daily]").value = data.keep_daily || 7;
+      document.querySelector("[name=warn_gb]").value = data.warn_gb || "50,20,10";
+      fillDrive(document.querySelector("#drives [name=photos]"), rows, data.photos);
+      fillDrive(document.querySelector("#drives [name=backup]"), rows, data.backup);
+      showSleep(data);
     });
+    document.getElementById("drives").onsubmit = async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      try {
+        await post("/api/settings/drives", { photos: form.get("photos"), backup: form.get("backup") });
+        const again = await fetch("/api/settings").then((response) => response.json());
+        showSleep(again);
+        document.getElementById("drive-error").textContent = "Saved";
+      } catch (error) { document.getElementById("drive-error").textContent = error.message; }
+    };
     document.getElementById("alerts").onsubmit = async (event) => {
       event.preventDefault();
       const form = new FormData(event.target);
@@ -600,6 +636,15 @@ def dispatch(handler, method):
             if not require_user(handler):
                 return True
             save_alerts(read_json(handler))
+            send_json(handler, 200, {"ok": True, "message": "Saved"})
+            return True
+        if method == "POST" and path == "/api/settings/drives":
+            if not require_user(handler):
+                return True
+            if status.borg_running():
+                raise ValueError("Wait until the backup finishes before changing drives")
+            data = read_json(handler)
+            save_drives(str(data.get("photos") or ""), str(data.get("backup") or ""))
             send_json(handler, 200, {"ok": True, "message": "Saved"})
             return True
         if method == "POST" and path == "/api/settings/sleep":

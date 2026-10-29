@@ -211,7 +211,8 @@ function duration(sec) {
 }
 function smartLine(s) {
   if (!s || !s.checked_at) return "SMART not checked yet";
-  return (s.ok ? "Healthy" : (s.summary || "SMART problem")) + ", checked " + s.checked_at;
+  const word = s.ok ? (s.summary || "Healthy") : (s.summary || "SMART problem");
+  return word + ", checked " + s.checked_at;
 }
 function render(d) {
   const dot = $("dot");
@@ -388,11 +389,6 @@ def last_success(lines):
             started = None
     if not found:
         return None
-    try:
-        if found["at"].timestamp() < os.path.getmtime(os.path.join(C.repo, "config")):
-            return None
-    except OSError:
-        return None
     return {
         "when": found["at"].strftime("%a %H:%M"),
         "took": format_duration(found["seconds"]),
@@ -431,46 +427,56 @@ def write_rate(used):
     return rate
 
 
-def last_check():
-    global _check_cache, _check_cache_at
-    now = time.monotonic()
-    if _check_cache is not None and now - _check_cache_at < 300:
-        return _check_cache
-    _, active, _ = run(["systemctl", "is-active", C.check_service], timeout=4)
-    _, journal, _ = run(
-        ["journalctl", "-u", C.check_service, "-n", "40", "-o", "short-iso", "--no-pager"],
-        timeout=4,
-    )
-    state = "unknown"
+def latest_outcome(lines):
+    """The newest finished backup, restore, or repository check in the log."""
+    outcome = ("", "")
+    for line in lines:
+        if "repository check passed" in line:
+            outcome = ("check", "passed")
+        elif "repository check failed" in line:
+            outcome = ("check", "failed")
+        elif "repository check skipped" in line:
+            outcome = ("check", "skipped")
+        elif "restore finished" in line:
+            outcome = ("restore", "ok")
+        elif " FAILED " in (" " + line):
+            outcome = ("restore", "failed") if "restore" in line.lower() else ("backup", "failed")
+        elif "borg create exit" in line:
+            match = re.search(r"borg create exit (\d+)", line)
+            code = int(match.group(1)) if match else 2
+            if code == 0:
+                outcome = ("backup", "ok")
+            elif code < 2:
+                outcome = ("backup", "warning")
+            else:
+                outcome = ("backup", "failed")
+    return outcome
+
+
+def borg_check_running():
+    _, out, _ = run(["ps", "-C", "borg", "-o", "args="])
+    if "borg check" in out:
+        return True
+    _, out, _ = run(["ps", "-eo", "args="])
+    return "borg check" in out
+
+
+def last_check(lines):
+    state = ""
     when = ""
-    for line in journal.splitlines():
-        match = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})", line)
-        stamp = datetime.fromisoformat(match.group(1)).strftime("%a %H:%M") if match else when
-        if "skipping integrity check" in line:
-            state, when = "skipped", stamp
-        elif "not mounted" in line or "Failed with result" in line:
-            state, when = "failed", stamp
-        elif "Deactivated successfully" in line:
-            if not (state in {"skipped", "failed"} and when == stamp):
-                state, when = "passed", stamp
-    if active.strip() in {"activating", "active"}:
+    for line in lines:
+        stamp = parse_stamp(line)
+        clock = stamp.strftime("%a %H:%M") if stamp else when
+        if "repository check passed" in line:
+            state, when = "passed", clock
+        elif "repository check failed" in line:
+            state, when = "failed", clock
+        elif "repository check skipped" in line:
+            state, when = "skipped", clock
+    _, active, _ = run(["systemctl", "is-active", C.check_service], timeout=4)
+    if active.strip() in {"activating", "active"} or borg_check_running():
         state = "running"
-    else:
-        try:
-            repo_time = os.path.getmtime(os.path.join(C.repo, "config"))
-        except OSError:
-            repo_time = 0
-        if when and state in {"passed", "skipped", "failed"}:
-            for line in reversed(journal.splitlines()):
-                match = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", line)
-                if match and datetime.fromisoformat(match.group(1)).strftime("%a %H:%M") == when:
-                    if datetime.fromisoformat(match.group(1)).timestamp() < repo_time:
-                        state = "pending"
-                        when = ""
-                    break
-    _check_cache = {"state": state, "when": when}
-    _check_cache_at = now
-    return _check_cache
+    return {"state": state or "unknown", "when": when}
 
 
 def space_level(backup):
@@ -610,14 +616,31 @@ def status():
         state = "failed"
         headline = "Restore failed" if kind == "restore" else "Backup failed"
         detail = reason or "The last attempt did not finish."
-    elif "borg create exit 0" in last or "starting local borg create" not in "\n".join(log):
-        state = "ok" if "exit 0" in last or "finished" in last.lower() else "ok"
-        headline = "Idle" if "exit 0" not in last else "Up to date"
-        detail = last or "Waiting for the nightly backup at " + C.schedule_label + "."
+    elif borg_check_running():
+        state = "running"
+        headline = "Checking"
+        detail = "Reading the backup archives."
     else:
-        state = "ok"
-        headline = "Idle"
-        detail = last or "No backup is running."
+        job, result = latest_outcome(full_log)
+        if job == "check" and result == "passed":
+            state, headline, detail = "ok", "Repository is healthy", "The integrity check passed."
+        elif job == "check" and result == "failed":
+            state, headline, detail = "failed", "Check failed", "The repository check did not pass."
+        elif job == "check" and result == "skipped":
+            state, headline, detail = "ok", "Check skipped", "A backup was already running."
+        elif job == "backup" and result == "ok":
+            state, headline, detail = "ok", "Up to date", "Backup finished."
+        elif job == "backup" and result == "warning":
+            state, headline, detail = "ok", "Finished with a warning", "The archive was saved, with a warning."
+        elif job == "restore" and result == "ok":
+            state, headline, detail = "ok", "Restored", "Immich was restored from the backup."
+        elif result == "failed":
+            state = "failed"
+            headline = "Restore failed" if job == "restore" else "Backup failed"
+            detail = reason or "The last attempt did not finish."
+        else:
+            state, headline = "ok", "Idle"
+            detail = "Waiting for the nightly backup at " + C.schedule_label + "."
 
     progress = None
     rate = None
@@ -660,7 +683,7 @@ def status():
         "eta_seconds": eta,
         "space": space_level(backup),
         "last_success": last_success(full_log),
-        "check": last_check(),
+        "check": last_check(full_log),
         "immich": "up" if immich_up() else "down",
         "smart": load_smart(),
         "failure": reason if state == "failed" else "",

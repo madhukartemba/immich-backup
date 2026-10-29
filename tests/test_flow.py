@@ -346,6 +346,43 @@ class FlowTests(unittest.TestCase):
         status, body = self.client.json("POST", "/api/settings/sleep", {"enabled": True, "idle_minutes": 0})
         self.assertEqual(status, 400)
 
+    def test_settings_can_point_the_backup_at_another_mounted_drive(self):
+        self.client.json("POST", "/api/setup/account", {"email": "owner@example.com", "password": "correct-horse"})
+        self.client.json("POST", "/api/setup/drives", {"photos": self.photos, "backup": self.backup})
+        other = os.path.join(self.root, "other-backup")
+        os.makedirs(other)
+        self.rows.append({
+            "mount": other,
+            "uuid": "other-uuid",
+            "fstype": "ext4",
+            "label": "other",
+            "size": 300,
+            "serial": "other",
+            "rotational": True,
+        })
+        page = self.client.request("GET", "/settings")[1]
+        self.assertIn(b"Save drives", page)
+        self.assertIn(b"Photo drive", page)
+        with patch("immich_backup.web.status.borg_running", return_value={"elapsed": "1"}):
+            status, body = self.client.json("POST", "/api/settings/drives", {"photos": self.photos, "backup": other})
+        self.assertEqual(status, 400)
+        self.assertIn("backup finishes", body["error"])
+        status, body = self.client.json("POST", "/api/settings/drives", {"photos": self.photos, "backup": other})
+        self.assertEqual(status, 200)
+        saved = load(self.cfg_path)
+        self.assertEqual(saved.media_mount, self.photos)
+        self.assertEqual(saved.backup_mount, other)
+        self.assertEqual(saved.backup_uuid, "other-uuid")
+        self.assertTrue(saved.backup_rotational)
+        self.assertEqual(saved.repo, other + "/immich-borg")
+        marker = os.path.join(other, ".backup-disk")
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(fh.read().strip(), "other-uuid")
+        self.assertTrue(marker.startswith(self.root))
+        status, settings = self.client.json("GET", "/api/settings")
+        self.assertEqual(settings["backup"], other)
+        self.assertTrue(settings["hdd"])
+
 
 class DiskFixtureTests(unittest.TestCase):
     def test_fixture_replaces_the_host_disk_list(self):

@@ -28,7 +28,7 @@ Disks are left as they are. Running the installer again refreshes the program an
 
 Create an account. Then choose one of the two paths.
 
-**Set up a new backup.** For a machine that already runs Immich. Choose the photo drive and the backup drive, then the alert email, the backup time, and how many days to keep. The first backup creates the repository. Seven days are kept, the backup runs at 01:00, and the repository is checked on Sunday at 10:00. Settings can change all three.
+**Set up a new backup.** For a machine that already runs Immich. Choose the photo drive and the backup drive, then the alert email, the backup time, and how many days to keep. The first backup creates the repository. Seven days are kept, the backup runs at 01:00, and the repository is checked on Sunday at 10:00. Settings can change the photo drive, the backup drive, the alert email, the backup time, and how many days to keep. Archives already stored on a previous backup drive stay on that drive.
 
 **Restore this machine.** For an empty computer. Choose the backup drive, a different photo drive, and one archive. Restore installs Immich, copies the library onto the photo drive, and loads the database from that same archive. The backup drive is only read.
 

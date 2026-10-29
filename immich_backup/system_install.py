@@ -74,6 +74,7 @@ BASE_PACKAGES = (
     "python3",
     "rsync",
     "borgbackup",
+    "smartmontools",
 )
 HOST_PACKAGES = ("hdparm", "smartmontools")
 
@@ -134,6 +135,8 @@ def install_packages(runner, distro, codename, arch, prefix, role):
         env,
         "could not install Borg and rsync",
     )
+    if role == "machine":
+        runner.run(["systemctl", "disable", "--now", "smartd"])
     if role == "host":
         _run(
             runner,
