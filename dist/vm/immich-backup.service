@@ -1,0 +1,14 @@
+[Unit]
+Description=Immich Borg backup
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=/opt/immich-backup
+WorkingDirectory=/opt/immich-backup
+ExecStart=/usr/bin/python3 -m immich_backup backup --config /etc/immich-backup/config.ini
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=infinity

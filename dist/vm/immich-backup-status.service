@@ -1,0 +1,15 @@
+[Unit]
+Description=Immich backup status page
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/opt/immich-backup
+WorkingDirectory=/opt/immich-backup
+ExecStart=/usr/bin/python3 -m immich_backup serve --config /etc/immich-backup/config.ini
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,62 @@
+from types import SimpleNamespace
+import os
+import tempfile
+import unittest
+
+from immich_backup.backup import space_note
+from immich_backup.config import load
+from immich_backup.install import write_units
+from immich_backup.spindown import should_standby
+from immich_backup.status import configure, last_success
+
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class AppTests(unittest.TestCase):
+    def test_config_and_units(self):
+        cfg = load(os.path.join(ROOT, "config.vm.example.ini"))
+        self.assertEqual(cfg.backup_calendar, "*-*-* 01:00:00")
+        self.assertEqual(cfg.keep_daily, 7)
+        self.assertIn("status", cfg.roles)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_units(cfg, tmp)
+            with open(os.path.join(tmp, "immich-backup.service"), encoding="utf-8") as fh:
+                text = fh.read()
+        self.assertIn("python3 -m immich_backup backup", text)
+        self.assertIn("PYTHONPATH=/opt/immich-backup", text)
+
+    def test_space_note_uses_the_lowest_limit(self):
+        cfg = load(os.path.join(ROOT, "config.vm.example.ini"))
+        self.assertIn("10 GB", space_note(cfg, 9 * 1024 * 1024))
+        self.assertIn("20 GB", space_note(cfg, 15 * 1024 * 1024))
+        self.assertEqual(space_note(cfg, 60 * 1024 * 1024), "")
+
+    def test_warning_exit_counts_as_a_finished_backup(self):
+        cfg = load(os.path.join(ROOT, "config.vm.example.ini"))
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "repo"))
+            open(os.path.join(tmp, "repo", "config"), "w", encoding="utf-8").close()
+            os.utime(os.path.join(tmp, "repo", "config"), (1_600_000_000, 1_600_000_000))
+            old = cfg.repo
+            cfg.repo = os.path.join(tmp, "repo")
+            configure(cfg)
+            result = last_success([
+                "2026-10-27T02:00:11+05:30 starting local borg create",
+                "2026-10-27T02:00:41+05:30 borg create exit 1",
+            ])
+            cfg.repo = old
+        self.assertEqual(result["when"], "Tue 02:00")
+        self.assertEqual(result["took"], "30 sec")
+
+    def test_hard_drive_sleeps_only_after_it_has_been_idle(self):
+        cfg = SimpleNamespace(spindown_enabled=True, spindown_idle_seconds=600)
+        self.assertFalse(should_standby(cfg, 100, "active/idle"))
+        self.assertTrue(should_standby(cfg, 600, "active/idle"))
+        self.assertFalse(should_standby(cfg, 600, "standby"))
+        cfg.spindown_enabled = False
+        self.assertFalse(should_standby(cfg, 600, "active/idle"))
+
+
+if __name__ == "__main__":
+    unittest.main()
