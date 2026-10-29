@@ -249,9 +249,9 @@ function render(d) {
   fill.className = "fill" + (d.state === "failed" ? " bad" : d.state === "running" ? "" : "");
   const b = d.backup || {};
   $("disk").textContent = gb(b.used);
-  const spaceNote = { low: ". Under 50 GB", tight: ". Under 20 GB", critical: ". Under 10 GB" }[d.space] || "";
+  const spaceNote = d.space_under ? ". Under " + d.space_under + " GB" : "";
   $("disksub").textContent = b.mount_ok ? gb(b.avail) + " free of " + gb(b.size) + spaceNote : "Backup disk is not mounted";
-  $("disksub").className = d.space === "low" ? "warn" : (d.space === "tight" || d.space === "critical" || d.space === "down" ? "bad" : "");
+  $("disksub").className = d.space === "low" ? "warn" : (d.space === "critical" || d.space === "down" ? "bad" : "");
   const smart = d.smart || {};
   $("diskhealth").textContent = smartLine(smart.backup);
   $("diskhealth").className = smart.backup && smart.backup.checked_at && !smart.backup.ok ? "bad" : "";
@@ -606,16 +606,15 @@ def last_check(lines):
 
 def space_level(backup):
     if not backup.get("mount_ok"):
-        return "down"
-    avail = backup.get("avail") or 0
-    gib = 1024 ** 3
-    if avail < 10 * gib:
-        return "critical"
-    if avail < 20 * gib:
-        return "tight"
-    if avail < 50 * gib:
-        return "low"
-    return "ok"
+        return "down", None
+    free_gb = (backup.get("avail") or 0) / (1024 ** 3)
+    stop = C.stop_free_gb
+    if stop > 0 and free_gb < stop:
+        return "critical", stop
+    crossed = [limit for limit in sorted(C.warn_gb) if free_gb < limit]
+    if crossed:
+        return "low", crossed[0]
+    return "ok", None
 
 
 def next_run():
@@ -807,6 +806,7 @@ def status():
     check = last_check(full_log)
     if headline == "Checking":
         check = {"state": "running", "at": check.get("at") or ""}
+    space = space_level(backup)
 
     return {
         "state": state,
@@ -823,7 +823,8 @@ def status():
         "archives_note": archives_note,
         "bytes_per_sec": rate,
         "eta_seconds": eta,
-        "space": space_level(backup),
+        "space": space[0],
+        "space_under": space[1],
         "last_success": last_success(full_log),
         "check": check,
         "immich": "up" if immich_up() else "down",

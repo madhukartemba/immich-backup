@@ -16,6 +16,7 @@ from immich_backup.status import (
     launch_state,
     listed_command,
     local_iso,
+    space_level,
 )
 
 
@@ -40,6 +41,17 @@ class AppTests(unittest.TestCase):
         self.assertIn("10 GB", space_note(cfg, 9 * 1024 * 1024))
         self.assertIn("20 GB", space_note(cfg, 15 * 1024 * 1024))
         self.assertEqual(space_note(cfg, 60 * 1024 * 1024), "")
+
+    def test_the_free_space_stop_is_separate_from_the_warnings(self):
+        cfg = load(os.path.join(ROOT, "config.vm.example.ini"))
+        cfg.stop_free_gb = 2
+        cfg.warn_gb = (50, 20, 10)
+        configure(cfg)
+        self.assertEqual(space_level({"mount_ok": True, "avail": 9 * 1024 ** 3}), ("low", 10))
+        self.assertEqual(space_level({"mount_ok": True, "avail": int(1.5 * 1024 ** 3)}), ("critical", 2))
+        cfg.stop_free_gb = 0
+        configure(cfg)
+        self.assertEqual(space_level({"mount_ok": True, "avail": 1024 ** 3}), ("low", 10))
 
     def test_warning_exit_counts_as_a_finished_backup(self):
         cfg = load(os.path.join(ROOT, "config.vm.example.ini"))

@@ -206,7 +206,19 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(settings["label"], "03:30")
         self.assertEqual(settings["keep_daily"], 14)
         self.assertEqual(settings["warn_gb"], "40,15,5")
+        self.assertEqual(settings["stop_free_gb"], 10)
         self.assertEqual(load(self.cfg_path).backup_calendar, "*-*-* 03:30:00")
+        status, body = self.client.json("POST", "/api/settings", {
+            "email": "alerts@example.com", "label": "03:30", "keep_daily": 14, "warn_gb": "40,15,5",
+            "stop_free_gb": -1,
+        })
+        self.assertEqual(status, 400)
+        status, body = self.client.json("POST", "/api/settings", {
+            "email": "alerts@example.com", "label": "03:30", "keep_daily": 14, "warn_gb": "40,15,5",
+            "stop_free_gb": 2,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(load(self.cfg_path).stop_free_gb, 2)
 
         self.client.cookie = ""
         status, _body = self.client.json("GET", "/api/status")

@@ -273,6 +273,8 @@ SETTINGS = page(
       <label>Alert email<input name="email" type="email" required></label>
       <label>Nightly backup time<input name="label" required placeholder="01:00"></label>
       <label>Days to keep<input name="keep_daily" type="number" min="1" max="365" required></label>
+      <label>Minimum free space, GB<input name="stop_free_gb" type="number" min="0" max="100000" required></label>
+      <p>A backup stops when the backup drive has less free space than this. Use 0 to keep going on a small drive.</p>
       <label>Free-space warnings, GB<input name="warn_gb" required placeholder="50,20,10"></label>
       <p class="error" id="alert-error"></p>
       <button type="submit">Save alerts</button>
@@ -321,6 +323,7 @@ SETTINGS = page(
       document.querySelector("[name=email]").value = data.email || "";
       document.querySelector("[name=label]").value = data.label || "";
       document.querySelector("[name=keep_daily]").value = data.keep_daily || 7;
+      document.querySelector("[name=stop_free_gb]").value = data.stop_free_gb ?? 10;
       document.querySelector("[name=warn_gb]").value = data.warn_gb || "50,20,10";
       fillDrive(document.querySelector("#drives [name=photos]"), rows, data.photos);
       fillDrive(document.querySelector("#drives [name=backup]"), rows, data.backup);
@@ -344,6 +347,7 @@ SETTINGS = page(
           email: form.get("email"),
           label: form.get("label"),
           keep_daily: Number(form.get("keep_daily")),
+          stop_free_gb: Number(form.get("stop_free_gb")),
           warn_gb: form.get("warn_gb")
         });
         document.getElementById("alert-error").textContent = "Saved";
@@ -479,6 +483,7 @@ def save_alerts(data):
     label = str(data.get("label") or "").strip()
     warn = str(data.get("warn_gb") or "").strip()
     keep = int(data.get("keep_daily") or 0)
+    stop = data.get("stop_free_gb", status.C.stop_free_gb)
     if not auth.email_ok(email):
         raise ValueError("Enter an alert email")
     if not label or len(label) > 40:
@@ -491,6 +496,12 @@ def save_alerts(data):
         raise ValueError("Enter warning levels such as 50,20,10")
     if keep < 1 or keep > 365:
         raise ValueError("Keep between 1 and 365 days")
+    try:
+        stop = int(stop)
+    except (TypeError, ValueError):
+        raise ValueError("Enter the minimum free space in GB") from None
+    if stop < 0 or stop > 100000:
+        raise ValueError("Enter the minimum free space in GB")
     hour, _, minute = label.partition(":")
     calendar = status.C.backup_calendar
     if hour.isdigit() and minute.isdigit():
@@ -498,7 +509,11 @@ def save_alerts(data):
     update(status.C.config_path, {
         "notify": {"email": email},
         "schedule": {"label": label, "backup": calendar},
-        "backup": {"keep_daily": keep, "warn_gb": ",".join(str(part) for part in parts)},
+        "backup": {
+            "keep_daily": keep,
+            "stop_free_gb": stop,
+            "warn_gb": ",".join(str(part) for part in parts),
+        },
     })
     reload()
 
@@ -563,6 +578,7 @@ def dispatch(handler, method):
                 "email": status.C.email,
                 "label": status.C.schedule_label,
                 "keep_daily": status.C.keep_daily,
+                "stop_free_gb": status.C.stop_free_gb,
                 "warn_gb": ",".join(str(part) for part in status.C.warn_gb),
                 "photos": status.C.media_mount,
                 "backup": status.C.backup_mount,
@@ -636,6 +652,7 @@ def dispatch(handler, method):
             if not require_user(handler):
                 return True
             save_alerts(read_json(handler))
+            status.invalidate_cache()
             send_json(handler, 200, {"ok": True, "message": "Saved"})
             return True
         if method == "POST" and path == "/api/settings/drives":
