@@ -120,7 +120,6 @@ PAGE = r"""<!DOCTYPE html>
     font: 12.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     color: #d5e0d4;
   }
-  footer { margin-top: 18px; color: var(--muted); font-size: 12px; }
   .recover { margin-top: 14px; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: var(--bg2); }
   .recover[hidden] { display: none; }
   .recover p { margin: 0 0 12px; font-size: 16px; }
@@ -190,7 +189,6 @@ PAGE = r"""<!DOCTYPE html>
         <pre id="log">No log yet.</pre>
       </article>
     </section>
-    <footer id="foot">Local status only. This page does not show photos or passwords.</footer>
   </div>
 <script>
 const $ = (id) => document.getElementById(id);
