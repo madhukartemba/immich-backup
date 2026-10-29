@@ -8,7 +8,7 @@ from immich_backup.backup import borg_warning, space_note
 from immich_backup.config import load
 from immich_backup.health import device_from_source, during_backup
 from immich_backup.install import write_units
-from immich_backup.spindown import should_standby, spin_label
+from immich_backup.spindown import drive_kind, should_standby, spin_label
 from immich_backup.status import PAGE, backup_spin
 from immich_backup.web import SETUP
 from immich_backup.status import (
@@ -28,6 +28,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class AppTests(unittest.TestCase):
+    def _write_drive(self, tmp, name, vendor, model, rotational):
+        root = os.path.join(tmp, "sys")
+        os.makedirs(os.path.join(root, "class", "block", name), exist_ok=True)
+        device = os.path.join(root, "block", name, "device")
+        queue = os.path.join(root, "block", name, "queue")
+        os.makedirs(device, exist_ok=True)
+        os.makedirs(queue, exist_ok=True)
+        for path, text in (
+            (os.path.join(device, "vendor"), vendor),
+            (os.path.join(device, "model"), model),
+            (os.path.join(queue, "rotational"), rotational),
+        ):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
     def test_config_and_units(self):
         cfg = load(os.path.join(ROOT, "config.vm.example.ini"))
         self.assertEqual(cfg.backup_calendar, "*-*-* 01:00:00")
@@ -216,15 +230,22 @@ class AppTests(unittest.TestCase):
                 seen.append(dev)
                 return "standby"
 
-            cfg = SimpleNamespace(backup_rotational=False, backup_disk=disk, backup_mount="/mnt/nowhere")
-            self.assertEqual(backup_spin(cfg, power), "")
+            cfg = SimpleNamespace(backup_rotational=True, backup_disk=disk, backup_mount="/mnt/nowhere")
+            self.assertEqual(backup_spin(cfg, power, lambda dev: "ssd"), "SSD")
+            self.assertEqual(backup_spin(cfg, power, lambda dev: "virtual"), "Virtual")
             self.assertEqual(seen, [])
-            cfg.backup_rotational = True
-            self.assertEqual(backup_spin(cfg, power), "Sleeping")
+            self.assertEqual(backup_spin(cfg, power, lambda dev: "hdd"), "Sleeping")
             self.assertEqual(seen, [disk])
             cfg.backup_disk = os.path.join(tmp, "missing")
-            self.assertEqual(backup_spin(cfg, power), "")
+            self.assertEqual(backup_spin(cfg, power, lambda dev: "hdd"), "")
             self.assertEqual(seen, [disk])
+            self._write_drive(tmp, "sdc", "QEMU", "QEMU HARDDISK", "1")
+            self._write_drive(tmp, "sdd", "ATA", "TOSHIBA MG08ADA800E", "1")
+            self._write_drive(tmp, "nvme0n1", "", "Samsung SSD 970 EVO", "0")
+            sys_root = os.path.join(tmp, "sys")
+            self.assertEqual(drive_kind(os.path.join(tmp, "sdc"), sys_root), "virtual")
+            self.assertEqual(drive_kind(os.path.join(tmp, "sdd"), sys_root), "hdd")
+            self.assertEqual(drive_kind(os.path.join(tmp, "nvme0n1"), sys_root), "ssd")
 
     def test_hard_drive_sleeps_only_after_it_has_been_idle(self):
         cfg = SimpleNamespace(spindown_enabled=True, spindown_idle_seconds=600)

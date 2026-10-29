@@ -31,6 +31,45 @@ def power_state(dev):
     return ""
 
 
+def _sys_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def drive_kind(dev, sys_root="/sys"):
+    """hdd, ssd, or virtual. Reads sysfs only, so a standby disk stays asleep."""
+    try:
+        name = os.path.basename(os.path.realpath(dev))
+    except OSError:
+        return ""
+    if not name:
+        return ""
+    link = os.path.join(sys_root, "class", "block", name)
+    if not os.path.exists(link):
+        return ""
+    if os.path.exists(os.path.join(link, "partition")):
+        parent = os.path.basename(os.path.dirname(os.path.realpath(link)))
+        if parent:
+            name = parent
+    base = os.path.join(sys_root, "block", name)
+    identity = (
+        _sys_text(os.path.join(base, "device", "vendor"))
+        + " "
+        + _sys_text(os.path.join(base, "device", "model"))
+    ).lower()
+    if any(mark in identity for mark in ("qemu", "vmware", "virtualbox", "vbox", "virtual disk", "virtual hd")):
+        return "virtual"
+    rota = _sys_text(os.path.join(base, "queue", "rotational"))
+    if rota == "0":
+        return "ssd"
+    if rota == "1":
+        return "hdd"
+    return ""
+
+
 def spin_label(power):
     text = (power or "").lower().replace(" ", "")
     if text in {"standby", "sleeping"}:

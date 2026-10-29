@@ -1,7 +1,8 @@
 """Status page. It reads logs and saved files. It does not call borg or smartctl.
 
-A rotational backup disk is asked for its power mode with hdparm -C, which
-leaves a standby disk asleep.
+A real hard-disk backup drive is asked for its power mode with hdparm -C,
+which leaves a standby disk asleep. An SSD is labeled SSD. A virtual disk
+is labeled Virtual. Neither of those is asked to spin.
 """
 
 import json
@@ -428,8 +429,14 @@ $("archives").addEventListener("click", (event) => {
   if (!button || button.disabled) return;
   downloadArchive(button.getAttribute("data-archive"));
 });
-$("run").onclick = () => act("/api/actions/backup", "Start a backup now? The backup disk will spin up.", $("run"), "Start backup");
-$("checkrepo").onclick = () => act("/api/actions/check", "Check the repository now? The backup disk will spin up.", $("checkrepo"), "Check repository");
+function diskPrompt(action) {
+  const kind = $("spin").textContent;
+  const spinning = kind === "Sleeping" || kind === "Spinning";
+  if (action === "backup") return spinning ? "Start a backup now? The backup disk will spin up." : "Start a backup now?";
+  return spinning ? "Check the repository now? The backup disk will spin up." : "Check the repository now?";
+}
+$("run").onclick = () => act("/api/actions/backup", diskPrompt("backup"), $("run"), "Start backup");
+$("checkrepo").onclick = () => act("/api/actions/check", diskPrompt("check"), $("checkrepo"), "Check repository");
 $("logout").onclick = () => act("/api/logout");
 async function tick() {
   try {
@@ -755,17 +762,26 @@ def last_check(lines):
     return {"state": state or "unknown", "at": at}
 
 
-def backup_spin(cfg, power_fn=None):
-    """Spinning or Sleeping for a hard-disk backup drive. hdparm -C does not wake it."""
-    if not cfg.backup_rotational:
-        return ""
-    from immich_backup.spindown import power_state, spin_label
+def backup_spin(cfg, power_fn=None, kind_fn=None):
+    """Sleeping or Spinning for a real hard disk. An SSD or a virtual disk gets that word instead."""
+    from immich_backup.spindown import drive_kind, power_state, spin_label
+    kind_fn = kind_fn or drive_kind
     power_fn = power_fn or power_state
     dev = cfg.backup_disk
     if not dev:
         from immich_backup.health import device_for_mount
         dev = device_for_mount(cfg.backup_mount)
     if not dev or not os.path.exists(dev):
+        return ""
+    try:
+        kind = kind_fn(dev)
+    except OSError:
+        return ""
+    if kind == "ssd":
+        return "SSD"
+    if kind == "virtual":
+        return "Virtual"
+    if kind != "hdd":
         return ""
     try:
         return spin_label(power_fn(dev))
